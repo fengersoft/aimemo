@@ -69,3 +69,80 @@ func (s *Store) ListCategories(sort string) ([]Category, error) {
 	}
 	return out, rows.Err()
 }
+
+// Stats summarises the stored memories.
+type Stats struct {
+	Total             int            `json:"total"`
+	CategoryCount     int            `json:"category_count"`
+	ByCategory        map[string]int `json:"by_category"`
+	ByType            map[string]int `json:"by_type"`
+	ByScope           map[string]int `json:"by_scope"`
+	AverageImportance float64        `json:"average_importance"`
+}
+
+// Stats returns a summary of the store.
+func (s *Store) Stats() (*Stats, error) {
+	out := &Stats{
+		ByCategory: map[string]int{},
+		ByType:     map[string]int{},
+		ByScope:    map[string]int{},
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&out.Total); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM categories`).Scan(&out.CategoryCount); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COALESCE(AVG(importance), 0) FROM memories`).Scan(&out.AverageImportance); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`SELECT c.name, COUNT(m.id) FROM categories c LEFT JOIN memories m ON m.category_id = c.id GROUP BY c.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out.ByCategory[name] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	trows, err := s.db.Query(`SELECT type, COUNT(*) FROM memories GROUP BY type`)
+	if err != nil {
+		return nil, err
+	}
+	defer trows.Close()
+	for trows.Next() {
+		var name string
+		var n int
+		if err := trows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out.ByType[name] = n
+	}
+	if err := trows.Err(); err != nil {
+		return nil, err
+	}
+
+	srows, err := s.db.Query(`SELECT scope, COUNT(*) FROM memories GROUP BY scope`)
+	if err != nil {
+		return nil, err
+	}
+	defer srows.Close()
+	for srows.Next() {
+		var name string
+		var n int
+		if err := srows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out.ByScope[name] = n
+	}
+	return out, srows.Err()
+}

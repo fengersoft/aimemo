@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -44,5 +45,37 @@ func TestNoCommandIsUsageError(t *testing.T) {
 	_, _, code := run(t)
 	if code != exitUsage {
 		t.Errorf("code = %d, want %d", code, exitUsage)
+	}
+}
+
+func TestGlobalFlagsAreExtractedAnywhere(t *testing.T) {
+	db := newDB(t)
+	stdout, stderr, code := run(t, "--db", db, "add", "--category", "c",
+		"--content", "hello", "--format", "json")
+	if code != exitOK {
+		t.Fatalf("code = %d, stderr = %s", code, stderr)
+	}
+	m := decode(t, stdout)
+	if m["ok"] != true {
+		t.Errorf("envelope = %v", m)
+	}
+	if _, err := os.Stat(db); err != nil {
+		t.Errorf("database was not created at %s: %v", db, err)
+	}
+}
+
+func TestErrorEnvelopeAndExitCode(t *testing.T) {
+	db := newDB(t)
+	_, stderr, code := run(t, "get", "999", "--db", db)
+	if code != exitError {
+		t.Errorf("code = %d, want %d", code, exitError)
+	}
+	m := decode(t, stderr)
+	if m["ok"] != false {
+		t.Errorf("envelope = %v", m)
+	}
+	errObj, _ := m["error"].(map[string]any)
+	if errObj["code"] != codeNotFound {
+		t.Errorf("error code = %v, want %v", errObj["code"], codeNotFound)
 	}
 }
