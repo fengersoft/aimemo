@@ -1,10 +1,12 @@
-// aimemo project main.go
+// aimemo is a memory store for AI agents.
 package main
 
 import (
-	"fmt"
+	"os"
+
+	"aimemo/internal/cli"
 )
 
 func main() {
-	fmt.Println("Hello World!")
+	os.Exit(cli.Run(os.Args[1:], os.Stdout, os.Stderr))
 }
