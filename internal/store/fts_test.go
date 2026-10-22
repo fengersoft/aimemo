@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -89,19 +88,8 @@ func TestTransformCJKRemovesNUL(t *testing.T) {
 	}
 }
 
-// openFTSStore opens a database for the tests that execute real MATCH queries.
-func openFTSStore(t *testing.T) *Store {
-	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "aimemo.db"))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-	return s
-}
-
 func TestBuildMatchMatchesIndexedText(t *testing.T) {
-	s := openFTSStore(t)
+	s := newTestStore(t)
 	if _, err := s.db.Exec(`INSERT INTO memories_fts(rowid, title, content, tags) VALUES(?,?,?,?)`,
 		int64(1), "", TransformCJK("最终选择 SQLite 作为本地持久化数据库"), ""); err != nil {
 		t.Fatalf("insert fts: %v", err)
@@ -121,7 +109,7 @@ func TestBuildMatchMatchesIndexedText(t *testing.T) {
 }
 
 func TestBuildMatchExpressionsAreExecutable(t *testing.T) {
-	s := openFTSStore(t)
+	s := newTestStore(t)
 	queries := []string{
 		`a"b`, `*`, `al*`, `NEAR(a b)`, `a OR b`, `-a`, `a:b`, `^a`, `(a)`, `[a]`, `{a}`,
 		`!a`, `@a`, `#a`, `$a`, `%a`, `&a`, `+a`, `=a`, `|a`, `\a`, `/a`, `.`, `,`, `?`,
@@ -146,7 +134,7 @@ func TestBuildMatchExpressionsAreExecutable(t *testing.T) {
 }
 
 func TestIndexFTSIsIdempotent(t *testing.T) {
-	s := openFTSStore(t)
+	s := newTestStore(t)
 	err := s.withTx(func(tx *sql.Tx) error {
 		if err := indexFTS(tx, 1, "标题", "旧内容", []string{"标签"}); err != nil {
 			return err
@@ -173,7 +161,7 @@ func TestIndexFTSIsIdempotent(t *testing.T) {
 }
 
 func TestNULIndexAndQueryAgree(t *testing.T) {
-	s := openFTSStore(t)
+	s := newTestStore(t)
 	if _, err := s.db.Exec(`INSERT INTO memories_fts(rowid, title, content, tags) VALUES(?,?,?,?)`,
 		int64(1), "", TransformCJK("a\x00b"), ""); err != nil {
 		t.Fatalf("insert fts: %v", err)
