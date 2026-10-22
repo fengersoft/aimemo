@@ -81,9 +81,18 @@ func hasSearchableToken(s string) bool {
 }
 
 // phrase wraps s as an FTS5 quoted phrase with quotes escaped by doubling.
+//
+// NUL bytes are removed: FTS5 parses the quoted text as a C string, so a NUL
+// inside a phrase truncates it and the statement fails with "unterminated
+// string". That is the very failure this builder exists to prevent.
 func phrase(s string) string {
+	s = strings.ReplaceAll(s, "\x00", "")
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
+
+// MaxQueryRunes caps the length of a search query. A longer query builds a
+// MATCH expression that is expensive for the FTS5 parser to evaluate.
+const MaxQueryRunes = 256
 
 // BuildMatch converts a user query into an FTS5 MATCH expression.
 //
@@ -91,10 +100,17 @@ func phrase(s string) string {
 // wrapped, because an unescaped quote makes FTS5 fail with "unterminated
 // string".
 //
-// When loose is false a CJK run becomes a phrase, which FTS5 matches only at
-// consecutive positions, i.e. an exact substring. When loose is true each CJK
-// character becomes its own term joined by AND, which widens recall.
+// The query is cut into fragments by whitespace and then by script. A CJK
+// fragment becomes one phrase, which FTS5 matches only at consecutive
+// positions, i.e. an exact substring: "数据库" matches "本地持久化数据库" but
+// not "数据在别处，还有库". Fragments are combined with AND, so a query that
+// mixes scripts requires all of its fragments to be present. When loose is
+// true each CJK character becomes its own term joined by AND, which widens
+// recall at the cost of the substring guarantee.
 func BuildMatch(query string, loose bool) (string, error) {
+	if n := len([]rune(query)); n > MaxQueryRunes {
+		return "", fmt.Errorf("query is %d characters long, at most %d are allowed", n, MaxQueryRunes)
+	}
 	fields := strings.Fields(query)
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty query")
