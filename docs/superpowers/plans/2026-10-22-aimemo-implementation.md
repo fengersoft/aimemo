@@ -115,7 +115,11 @@ git commit -m "chore: initialize module and add sqlite dependency"
 package store
 
 import (
+	"database/sql"
+	"errors"
+	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -140,6 +144,9 @@ func TestOpenCreatesSchemaWithTimestamps(t *testing.T) {
 		}
 		tables[name] = true
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
 	for _, want := range []string{"categories", "memories", "memory_tags", "memories_fts"} {
 		if !tables[want] {
 			t.Errorf("missing table %q", want)
@@ -158,6 +165,9 @@ func TestOpenCreatesSchemaWithTimestamps(t *testing.T) {
 				t.Fatalf("scan cols: %v", err)
 			}
 			cols[name] = true
+		}
+		if err := crows.Err(); err != nil {
+			t.Fatalf("cols rows %s: %v", tbl, err)
 		}
 		crows.Close()
 		if !cols["created_at"] {
@@ -180,6 +190,82 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatalf("second Open: %v", err)
 	}
 	s2.Close()
+}
+
+func TestOpenRejectsEmptyPath(t *testing.T) {
+	if _, err := Open(""); err == nil {
+		t.Fatal("expected an error for an empty path")
+	}
+}
+
+func TestOpenHandlesSpecialCharactersInPath(t *testing.T) {
+	// A "file:" URI prefix would truncate the path at "#" and decode "%20".
+	path := filepath.Join(t.TempDir(), "ha#sh a%20b.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.db.Exec(`CREATE TABLE probe(x)`); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("database was not created at %q: %v", path, err)
+	}
+}
+
+func TestNowUsesCanonicalFormat(t *testing.T) {
+	got := Now()
+	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$`).MatchString(got) {
+		t.Errorf("Now() = %q, want the canonical UTC format", got)
+	}
+}
+
+func TestNowIsStrictlyIncreasing(t *testing.T) {
+	// The wall clock of the host may advance only every few milliseconds, so
+	// two writes in a row must still get different timestamps.
+	prev := Now()
+	for i := 0; i < 100; i++ {
+		got := Now()
+		if got <= prev {
+			t.Fatalf("Now() = %q, want a value greater than %q", got, prev)
+		}
+		prev = got
+	}
+}
+
+func TestWithTxCommitsAndRollsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aimemo.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.withTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO categories(name, created_at, updated_at) VALUES('a', ?, ?)`, Now(), Now())
+		return err
+	}); err != nil {
+		t.Fatalf("withTx commit: %v", err)
+	}
+
+	boom := errors.New("boom")
+	if err := s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO categories(name, created_at, updated_at) VALUES('b', ?, ?)`, Now(), Now()); err != nil {
+			return err
+		}
+		return boom
+	}); !errors.Is(err, boom) {
+		t.Fatalf("withTx error = %v, want %v", err, boom)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM categories WHERE name = 'b'`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("rolled back row is still present")
+	}
 }
 ```
 
@@ -249,9 +335,12 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -264,17 +353,33 @@ type Store struct {
 
 // Open opens the database at path, creating the directory and schema if needed.
 func Open(path string) (*Store, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("open database: path must not be empty")
+	}
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
 	}
+	// The path is used verbatim instead of behind a "file:" URI prefix: the
+	// URI form treats "#" and "%" as escapes and would silently open a
+	// different database. modernc still applies every _pragma to each pooled
+	// connection.
+	//
+	// _txlock=immediate starts write transactions as BEGIN IMMEDIATE. The
+	// default deferred mode reads first and then upgrades to a write lock,
+	// which fails with SQLITE_BUSY without honouring busy_timeout when two
+	// agents write at the same time.
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
+		"%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate",
 		filepath.ToSlash(path),
 	)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
@@ -287,10 +392,29 @@ func Open(path string) (*Store, error) {
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// nowMu guards lastNow.
+var (
+	nowMu   sync.Mutex
+	lastNow time.Time
+)
+
 // Now returns the canonical timestamp used by every table: UTC RFC3339 with
-// millisecond precision, so lexical order equals chronological order.
+// microsecond precision, so lexical order equals chronological order.
+//
+// The wall clock of some hosts advances only every few milliseconds, so two
+// writes in a row would otherwise share a timestamp and an update would look
+// like it changed nothing. The emitted value is therefore strictly
+// increasing: when the clock has not advanced, the previous value is bumped by
+// one microsecond.
 func Now() string {
-	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	nowMu.Lock()
+	defer nowMu.Unlock()
+	t := time.Now().UTC()
+	if !t.After(lastNow) {
+		t = lastNow.Add(time.Microsecond)
+	}
+	lastNow = t
+	return t.Format("2006-01-02T15:04:05.000000Z")
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx.
@@ -306,8 +430,10 @@ func (s *Store) withTx(fn func(*sql.Tx) error) error {
 	if err != nil {
 		return err
 	}
+	// Rollback after a successful commit is a no-op, so this is safe and it
+	// also releases the transaction when fn panics.
+	defer tx.Rollback()
 	if err := fn(tx); err != nil {
-		tx.Rollback()
 		return err
 	}
 	return tx.Commit()
@@ -755,11 +881,17 @@ type Category struct {
 
 // ensureCategory returns the id of the category with the given name, creating
 // it when it does not exist. Name matching is case-insensitive.
+//
+// An existing category has its updated_at refreshed, because adding a memory
+// to it is a write to the category.
 func ensureCategory(tx *sql.Tx, name string) (int64, error) {
 	name = strings.TrimSpace(name)
 	var id int64
 	err := tx.QueryRow(`SELECT id FROM categories WHERE name = ? COLLATE NOCASE`, name).Scan(&id)
 	if err == nil {
+		if _, err := tx.Exec(`UPDATE categories SET updated_at = ? WHERE id = ?`, Now(), id); err != nil {
+			return 0, err
+		}
 		return id, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -2666,13 +2798,13 @@ func parseBoundary(v string, endOfDay bool) (string, error) {
 		if endOfDay {
 			t = t.Add(24*time.Hour - time.Millisecond)
 		}
-		return t.UTC().Format("2006-01-02T15:04:05.000Z"), nil
+		return t.UTC().Format("2006-01-02T15:04:05.000000Z"), nil
 	}
 	t, err := time.Parse(time.RFC3339, v)
 	if err != nil {
 		return "", newError(codeInvalidArgs, "invalid timestamp %q, expected RFC3339 or YYYY-MM-DD", v)
 	}
-	return t.UTC().Format("2006-01-02T15:04:05.000Z"), nil
+	return t.UTC().Format("2006-01-02T15:04:05.000000Z"), nil
 }
 
 // parseID parses a record id.
