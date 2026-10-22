@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // IsCJK reports whether r is a CJK-style letter that must be tokenized
@@ -23,10 +24,17 @@ func IsCJK(r rune) bool {
 //
 // The padding is collapsed back to single spaces so that the transformed text
 // is a clean token sequence and matches what BuildMatch produces.
+//
+// NUL bytes are dropped. FTS5 tokenizes them as a separator, so keeping them
+// in the index but stripping them from the query would make a document and an
+// identical query disagree.
 func TransformCJK(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) * 2)
 	for _, r := range s {
+		if r == 0 {
+			continue
+		}
 		if IsCJK(r) {
 			b.WriteRune(' ')
 			b.WriteRune(r)
@@ -103,12 +111,13 @@ const MaxQueryRunes = 256
 // The query is cut into fragments by whitespace and then by script. A CJK
 // fragment becomes one phrase, which FTS5 matches only at consecutive
 // positions, i.e. an exact substring: "数据库" matches "本地持久化数据库" but
-// not "数据在别处，还有库". Fragments are combined with AND, so a query that
+// not "数据在别处，还有库". A phrase must also lie inside a single column
+// (title, content or tags). Fragments are combined with AND, so a query that
 // mixes scripts requires all of its fragments to be present. When loose is
 // true each CJK character becomes its own term joined by AND, which widens
 // recall at the cost of the substring guarantee.
 func BuildMatch(query string, loose bool) (string, error) {
-	if n := len([]rune(query)); n > MaxQueryRunes {
+	if n := utf8.RuneCountInString(query); n > MaxQueryRunes {
 		return "", fmt.Errorf("query is %d characters long, at most %d are allowed", n, MaxQueryRunes)
 	}
 	fields := strings.Fields(query)

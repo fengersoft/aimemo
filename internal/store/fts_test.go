@@ -75,8 +75,17 @@ func TestBuildMatchRejectsEmpty(t *testing.T) {
 }
 
 func TestBuildMatchRejectsOversizedQuery(t *testing.T) {
+	if _, err := BuildMatch(strings.Repeat("数", MaxQueryRunes), false); err != nil {
+		t.Errorf("BuildMatch should accept a query of exactly %d characters: %v", MaxQueryRunes, err)
+	}
 	if _, err := BuildMatch(strings.Repeat("数", MaxQueryRunes+1), false); err == nil {
 		t.Error("BuildMatch should reject an oversized query")
+	}
+}
+
+func TestTransformCJKRemovesNUL(t *testing.T) {
+	if got := TransformCJK("a\x00b"); got != "ab" {
+		t.Errorf("TransformCJK(%q) = %q, want %q", "a\x00b", got, "ab")
 	}
 }
 
@@ -118,16 +127,21 @@ func TestBuildMatchExpressionsAreExecutable(t *testing.T) {
 		`!a`, `@a`, `#a`, `$a`, `%a`, `&a`, `+a`, `=a`, `|a`, `\a`, `/a`, `.`, `,`, `?`,
 		`<`, `>`, `;`, `~`, "`", `_`, "a\x00b", "数据\x00库", "  ", "!!!",
 	}
+	executed := 0
 	for _, q := range queries {
 		expr, err := BuildMatch(q, false)
 		if err != nil {
 			// Rejecting the query up front is an acceptable outcome too.
 			continue
 		}
+		executed++
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?`, expr).Scan(&n); err != nil {
 			t.Errorf("query %q produced an invalid expression %q: %v", q, expr, err)
 		}
+	}
+	if executed < 20 {
+		t.Fatalf("only %d of %d queries were executed, the corpus no longer exercises MATCH", executed, len(queries))
 	}
 }
 
@@ -155,6 +169,25 @@ func TestIndexFTSIsIdempotent(t *testing.T) {
 	}
 	if content != TransformCJK("新内容") {
 		t.Errorf("content = %q, want %q", content, TransformCJK("新内容"))
+	}
+}
+
+func TestNULIndexAndQueryAgree(t *testing.T) {
+	s := openFTSStore(t)
+	if _, err := s.db.Exec(`INSERT INTO memories_fts(rowid, title, content, tags) VALUES(?,?,?,?)`,
+		int64(1), "", TransformCJK("a\x00b"), ""); err != nil {
+		t.Fatalf("insert fts: %v", err)
+	}
+	expr, err := BuildMatch("a\x00b", false)
+	if err != nil {
+		t.Fatalf("BuildMatch: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?`, expr).Scan(&n); err != nil {
+		t.Fatalf("match: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("matches = %d, want 1", n)
 	}
 }
 
