@@ -305,6 +305,13 @@ transform(s):
 
 原始查询串**绝不**直接传给 FTS5 的 MATCH 运算符。
 
+语义要点：
+
+- **片段内是精确子串**：单个 CJK 片段 `"数 据 库"` 只命中字符连续的那一段，不会命中"数据在别处，还有库"
+- **片段间是 AND**：含拉丁文或标点的查询会被拆成多个片段，要求全部命中；越宽松召回越高
+- 查询长度上限 `MaxQueryRunes = 256`，超出返回 `invalid_args`
+- NUL 字节在写入 MATCH 前被剔除：FTS5 按 C 字符串解析引号内文本，NUL 会截断引号并报 `unterminated string`
+
 ### 7.3 索引同步
 
 - 新增记忆：`INSERT INTO memories_fts(rowid, title, content, tags)`，内容为变换后文本，tags 为空格连接后的变换文本
