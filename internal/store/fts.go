@@ -177,3 +177,75 @@ func indexFTS(tx *sql.Tx, id int64, title, content string, tags []string) error 
 	)
 	return err
 }
+
+// MatchContext returns a window of the original text around the longest query
+// fragment that occurs in it. The window is computed on the unpadded text, so
+// the result never contains the artificial spaces inserted for tokenization.
+func MatchContext(content, query string, window int) string {
+	hr := []rune(content)
+	fragments := queryFragments(query)
+
+	bestStart, bestLen := -1, 0
+	for _, f := range fragments {
+		fr := []rune(f)
+		if len(fr) == 0 {
+			continue
+		}
+		if idx := indexFoldRunes(hr, fr); idx >= 0 && len(fr) > bestLen {
+			bestStart, bestLen = idx, len(fr)
+		}
+	}
+	if bestStart < 0 {
+		end := window * 2
+		if end > len(hr) {
+			end = len(hr)
+		}
+		out := string(hr[:end])
+		if end < len(hr) {
+			out += "…"
+		}
+		return out
+	}
+
+	start := bestStart - window
+	if start < 0 {
+		start = 0
+	}
+	end := bestStart + bestLen + window
+	if end > len(hr) {
+		end = len(hr)
+	}
+	out := string(hr[start:end])
+	if start > 0 {
+		out = "…" + out
+	}
+	if end < len(hr) {
+		out += "…"
+	}
+	return out
+}
+
+// indexFoldRunes returns the index of needle inside haystack, comparing runes
+// case-insensitively.
+func indexFoldRunes(haystack, needle []rune) int {
+	if len(needle) == 0 || len(needle) > len(haystack) {
+		return -1
+	}
+	lower := make([]rune, len(haystack))
+	for i, r := range haystack {
+		lower[i] = unicode.ToLower(r)
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		ok := true
+		for j := range needle {
+			if lower[i+j] != unicode.ToLower(needle[j]) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return i
+		}
+	}
+	return -1
+}

@@ -220,3 +220,274 @@ func tagsOf(q querier, memoryID int64) ([]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// UpdateInput carries the fields to change. A nil pointer means "keep".
+type UpdateInput struct {
+	Type       *string
+	Importance *int
+	Title      *string
+	Content    *string
+	Category   *string
+	Scope      *string
+	Source     *string
+	SetTags    *[]string
+	AddTags    []string
+	RemoveTags []string
+}
+
+// Update changes a record in place.
+func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
+	var out *Memory
+	err := s.withTx(func(tx *sql.Tx) error {
+		cur, err := getMemory(tx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+
+		next := UpdateInput{
+			Type:       &cur.Type,
+			Importance: &cur.Importance,
+			Title:      &cur.Title,
+			Content:    &cur.Content,
+			Scope:      &cur.Scope,
+			Source:     &cur.Source,
+		}
+		if in.Type != nil {
+			next.Type = in.Type
+		}
+		if in.Importance != nil {
+			next.Importance = in.Importance
+		}
+		if in.Title != nil {
+			next.Title = in.Title
+		}
+		if in.Content != nil {
+			next.Content = in.Content
+		}
+		if in.Scope != nil {
+			next.Scope = in.Scope
+		}
+		if in.Source != nil {
+			next.Source = in.Source
+		}
+
+		catName := cur.Category
+		if in.Category != nil {
+			catName = *in.Category
+		}
+		probe := CreateInput{
+			Category:   catName,
+			Type:       *next.Type,
+			Importance: *next.Importance,
+			Title:      *next.Title,
+			Content:    *next.Content,
+			Scope:      *next.Scope,
+			Source:     *next.Source,
+		}
+		if err := probe.validate(); err != nil {
+			return err
+		}
+
+		catID := cur.CategoryID
+		if in.Category != nil {
+			catID, err = ensureCategory(tx, *in.Category)
+			if err != nil {
+				return err
+			}
+		}
+
+		now := Now()
+		if _, err := tx.Exec(`
+			UPDATE memories
+			SET category_id=?, type=?, importance=?, title=?, content=?, scope=?, source=?, updated_at=?
+			WHERE id=?`,
+			catID, *next.Type, *next.Importance, *next.Title, *next.Content,
+			*next.Scope, *next.Source, now, id); err != nil {
+			return err
+		}
+
+		tags := cur.Tags
+		switch {
+		case in.SetTags != nil:
+			tags = append([]string{}, *in.SetTags...)
+			seen := map[string]bool{}
+			for _, t := range tags {
+				if strings.TrimSpace(t) == "" {
+					return fmt.Errorf("%w: tag must not be empty", ErrInvalid)
+				}
+				if len([]rune(t)) > MaxTagLen {
+					return fmt.Errorf("%w: tag exceeds %d characters", ErrInvalid, MaxTagLen)
+				}
+				if seen[t] {
+					return fmt.Errorf("%w: duplicate tag %q", ErrInvalid, t)
+				}
+				seen[t] = true
+			}
+			if len(tags) > MaxTags {
+				return fmt.Errorf("%w: at most %d tags are allowed", ErrInvalid, MaxTags)
+			}
+			if err := setTags(tx, id, tags, now); err != nil {
+				return err
+			}
+		case len(in.AddTags) > 0 || len(in.RemoveTags) > 0:
+			remove := map[string]bool{}
+			for _, t := range in.RemoveTags {
+				remove[t] = true
+			}
+			kept := []string{}
+			present := map[string]bool{}
+			for _, t := range tags {
+				if remove[t] {
+					continue
+				}
+				kept = append(kept, t)
+				present[t] = true
+			}
+			for _, t := range in.AddTags {
+				if strings.TrimSpace(t) == "" {
+					return fmt.Errorf("%w: tag must not be empty", ErrInvalid)
+				}
+				if len([]rune(t)) > MaxTagLen {
+					return fmt.Errorf("%w: tag exceeds %d characters", ErrInvalid, MaxTagLen)
+				}
+				if !present[t] {
+					kept = append(kept, t)
+					present[t] = true
+				}
+			}
+			if len(kept) > MaxTags {
+				return fmt.Errorf("%w: at most %d tags are allowed", ErrInvalid, MaxTags)
+			}
+			tags = kept
+			if err := setTags(tx, id, tags, now); err != nil {
+				return err
+			}
+		}
+
+		if err := indexFTS(tx, id, *next.Title, *next.Content, tags); err != nil {
+			return err
+		}
+		m, err := getMemory(tx, id)
+		if err != nil {
+			return err
+		}
+		out = m
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Delete removes a record, its tags and its FTS row.
+func (s *Store) Delete(id int64) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		if _, err := tx.Exec(`DELETE FROM memories_fts WHERE rowid = ?`, id); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// ListResult is a page of memories.
+type ListResult struct {
+	Items  []Memory `json:"items"`
+	Total  int      `json:"total"`
+	Limit  int      `json:"limit"`
+	Offset int      `json:"offset"`
+}
+
+// SearchResult is a page of matches for a keyword query.
+type SearchResult struct {
+	Items []Memory `json:"items"`
+	Total int      `json:"total"`
+	Query string   `json:"query"`
+}
+
+// List returns memories matching the filter, newest first by default.
+func (s *Store) List(f Filter, limit, offset int, sort string) (*ListResult, error) {
+	where, args := f.clauses()
+
+	var total int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM memories m JOIN categories c ON c.id = m.category_id
+		WHERE 1=1`+where, args...).Scan(&total); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`
+		SELECT `+selectMemoryColumns+`
+		FROM memories m JOIN categories c ON c.id = m.category_id
+		WHERE 1=1`+where+` `+orderBy(sort, false)+` LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...)
+	if err != nil {
+		return nil, err
+	}
+	items, err := scanMemories(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := attachTags(s.db, items); err != nil {
+		return nil, err
+	}
+	return &ListResult{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+// Search performs a full text search and returns matching memories with a
+// window of surrounding text.
+func (s *Store) Search(query string, f Filter, limit, offset int, sort string, loose bool) (*SearchResult, error) {
+	expr, err := BuildMatch(query, loose)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	where, args := f.clauses()
+	args = append([]any{expr}, args...)
+
+	var total int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM memories_fts
+		JOIN memories m ON m.id = memories_fts.rowid
+		JOIN categories c ON c.id = m.category_id
+		WHERE memories_fts MATCH ?`+where, args...).Scan(&total); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`
+		SELECT `+selectMemoryColumns+`
+		FROM memories_fts
+		JOIN memories m ON m.id = memories_fts.rowid
+		JOIN categories c ON c.id = m.category_id
+		WHERE memories_fts MATCH ?`+where+` `+orderBy(sort, true)+` LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...)
+	if err != nil {
+		return nil, err
+	}
+	items, err := scanMemories(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := attachTags(s.db, items); err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].MatchContext = MatchContext(items[i].Content, query, 120)
+	}
+	return &SearchResult{Items: items, Total: total, Query: query}, nil
+}
