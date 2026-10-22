@@ -1,0 +1,4 @@
+*.exe
+aimemo.db
+aimemo.db-shm
+aimemo.db-wal
