@@ -562,6 +562,7 @@ func TestTransformCJKRemovesNUL(t *testing.T) {
 }
 
 // openFTSStore opens a database for the tests that execute real MATCH queries.
+// Task 4 replaces it with the newTestStore helper.
 func openFTSStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "aimemo.db"))
@@ -946,10 +947,32 @@ func TestCreateAutoCreatesCategory(t *testing.T) {
 	}
 }
 
+func TestCreateAppliesDefaults(t *testing.T) {
+	s := newTestStore(t)
+	m, err := s.Create(CreateInput{Category: "c", Content: "x"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if m.Type != TypeNote {
+		t.Errorf("type = %q, want %q", m.Type, TypeNote)
+	}
+	if m.Importance != 3 {
+		t.Errorf("importance = %d, want 3", m.Importance)
+	}
+}
+
+func TestCreateRejectsDuplicateTags(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.Create(CreateInput{Category: "c", Content: "x", Tags: []string{"a", "a"}})
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("expected ErrInvalid for a duplicate tag, got %v", err)
+	}
+}
+
 func TestCreateReusesCategoryIgnoringCase(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.Create(CreateInput{Category: "技术选型", Content: "x"})
-	b, _ := s.Create(CreateInput{Category: "技术选型", Content: "y"})
+	a, _ := s.Create(CreateInput{Category: "Tech", Content: "x"})
+	b, _ := s.Create(CreateInput{Category: "TECH", Content: "y"})
 	if a.CategoryID != b.CategoryID {
 		t.Errorf("expected same category, got %d and %d", a.CategoryID, b.CategoryID)
 	}
@@ -959,6 +982,9 @@ func TestCreateReusesCategoryIgnoringCase(t *testing.T) {
 	}
 	if len(cats) != 1 {
 		t.Errorf("expected 1 category, got %d", len(cats))
+	}
+	if cats[0].MemoryCount != 2 {
+		t.Errorf("memory_count = %d, want 2", cats[0].MemoryCount)
 	}
 }
 
@@ -1205,6 +1231,7 @@ func (in CreateInput) validate() error {
 	if len(in.Tags) > MaxTags {
 		return fmt.Errorf("%w: at most %d tags are allowed", ErrInvalid, MaxTags)
 	}
+	seen := map[string]bool{}
 	for _, t := range in.Tags {
 		if strings.TrimSpace(t) == "" {
 			return fmt.Errorf("%w: tag must not be empty", ErrInvalid)
@@ -1212,6 +1239,10 @@ func (in CreateInput) validate() error {
 		if len([]rune(t)) > MaxTagLen {
 			return fmt.Errorf("%w: tag exceeds %d characters", ErrInvalid, MaxTagLen)
 		}
+		if seen[t] {
+			return fmt.Errorf("%w: duplicate tag %q", ErrInvalid, t)
+		}
+		seen[t] = true
 	}
 	return nil
 }
@@ -1321,7 +1352,13 @@ func tagsOf(q querier, memoryID int64) ([]string, error) {
 }
 ```
 
-- [ ] **Step 5: 运行测试确认通过**
+- [ ] **Step 5: 合并测试辅助函数**
+
+`internal/store/fts_test.go` 里的 `openFTSStore` 与 `memory_test.go` 里的
+`newTestStore` 完全重复。删掉 `openFTSStore`，把它的四处调用改成 `newTestStore`，
+同时移除 `fts_test.go` 中不再使用的 `"path/filepath"` import。
+
+- [ ] **Step 6: 运行测试确认通过**
 
 ```bash
 cd D:/work2026/aimemo
@@ -1330,7 +1367,7 @@ go test ./internal/store/
 
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
 cd D:/work2026/aimemo
@@ -1412,12 +1449,17 @@ func TestUpdateReindexesFTS(t *testing.T) {
 	if _, err := s.Update(m.ID, UpdateInput{Content: &newContent}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	res, err := s.Search("数据库", Filter{}, 10, 0, "created_at", false)
+	// The FTS index is queried directly: Search only arrives with Task 6.
+	expr, err := BuildMatch("数据库", false)
 	if err != nil {
-		t.Fatalf("Search: %v", err)
+		t.Fatalf("BuildMatch: %v", err)
 	}
-	if res.Total != 0 {
-		t.Errorf("old content should no longer match, got %d hits", res.Total)
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?`, expr).Scan(&n); err != nil {
+		t.Fatalf("match: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("old content should no longer match, got %d hits", n)
 	}
 }
 
@@ -1431,6 +1473,15 @@ func TestUpdateReplacesTags(t *testing.T) {
 	}
 	if len(got.Tags) != 1 || got.Tags[0] != "z" {
 		t.Errorf("tags = %v, want [z]", got.Tags)
+	}
+}
+
+func TestUpdateRejectsDuplicateTags(t *testing.T) {
+	s := newTestStore(t)
+	m, _ := s.Create(CreateInput{Category: "c", Content: "x", Tags: []string{"a"}})
+	replacement := []string{"z", "z"}
+	if _, err := s.Update(m.ID, UpdateInput{SetTags: &replacement}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("expected ErrInvalid for duplicate tags, got %v", err)
 	}
 }
 
@@ -1561,6 +1612,7 @@ func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
 		switch {
 		case in.SetTags != nil:
 			tags = append([]string{}, *in.SetTags...)
+			seen := map[string]bool{}
 			for _, t := range tags {
 				if strings.TrimSpace(t) == "" {
 					return fmt.Errorf("%w: tag must not be empty", ErrInvalid)
@@ -1568,6 +1620,10 @@ func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
 				if len([]rune(t)) > MaxTagLen {
 					return fmt.Errorf("%w: tag exceeds %d characters", ErrInvalid, MaxTagLen)
 				}
+				if seen[t] {
+					return fmt.Errorf("%w: duplicate tag %q", ErrInvalid, t)
+				}
+				seen[t] = true
 			}
 			if len(tags) > MaxTags {
 				return fmt.Errorf("%w: at most %d tags are allowed", ErrInvalid, MaxTags)
@@ -2192,6 +2248,7 @@ git commit -m "feat: add filters, listing, full text search and match context"
 **Files:**
 - Create: `internal/cli/root.go`
 - Create: `internal/cli/render.go`
+- Create: `internal/cli/commands.go`（命令桩，Task 8 覆盖）
 - Modify: `main.go`
 - Create: `internal/cli/root_test.go`
 
@@ -2205,7 +2262,6 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -2247,38 +2303,6 @@ func TestNoCommandIsUsageError(t *testing.T) {
 	_, _, code := run(t)
 	if code != exitUsage {
 		t.Errorf("code = %d, want %d", code, exitUsage)
-	}
-}
-
-func TestGlobalFlagsAreExtractedAnywhere(t *testing.T) {
-	db := newDB(t)
-	stdout, stderr, code := run(t, "--db", db, "add", "--category", "c",
-		"--content", "hello", "--format", "json")
-	if code != exitOK {
-		t.Fatalf("code = %d, stderr = %s", code, stderr)
-	}
-	m := decode(t, stdout)
-	if m["ok"] != true {
-		t.Errorf("envelope = %v", m)
-	}
-	if _, err := os.Stat(db); err != nil {
-		t.Errorf("database was not created at %s: %v", db, err)
-	}
-}
-
-func TestErrorEnvelopeAndExitCode(t *testing.T) {
-	db := newDB(t)
-	_, stderr, code := run(t, "get", "999", "--db", db)
-	if code != exitError {
-		t.Errorf("code = %d, want %d", code, exitError)
-	}
-	m := decode(t, stderr)
-	if m["ok"] != false {
-		t.Errorf("envelope = %v", m)
-	}
-	errObj, _ := m["error"].(map[string]any)
-	if errObj["code"] != codeNotFound {
-		t.Errorf("error code = %v, want %v", errObj["code"], codeNotFound)
 	}
 }
 ```
@@ -2688,9 +2712,17 @@ func sortStrings(s []string) {
 }
 ```
 
-- [ ] **Step 5: 在 internal/cli/root.go 末尾追加命令桩**
+- [ ] **Step 5: 创建 internal/cli/commands.go（命令桩）**
+
+Task 8 会把这里的桩替换成真正的实现，所以桩单独放在 `commands.go` 里，
+而不是追加到 `root.go` 末尾——否则 Task 8 会产生重复定义。
 
 ```go
+package cli
+
+import "io"
+
+// The command stubs are replaced by the real implementations in Task 8.
 func runAdd(g globalOpts, args []string, stdout, stderr io.Writer) int       { return exitUsage }
 func runList(g globalOpts, args []string, stdout, stderr io.Writer) int      { return exitUsage }
 func runSearch(g globalOpts, args []string, stdout, stderr io.Writer) int    { return exitUsage }
@@ -2743,7 +2775,7 @@ git commit -m "feat: add cli skeleton with json envelope and exit codes"
 ### Task 8: 九个子命令的实现
 
 **Files:**
-- Create: `internal/cli/commands.go`
+- Modify: `internal/cli/commands.go`（整体替换命令桩）
 - Modify: `internal/store/category.go`（新增 `Stats`）
 
 - [ ] **Step 1: 在 internal/store/category.go 末尾追加 Stats**
@@ -2827,7 +2859,9 @@ func (s *Store) Stats() (*Stats, error) {
 }
 ```
 
-- [ ] **Step 2: 创建 internal/cli/commands.go**
+- [ ] **Step 2: 用完整实现替换 internal/cli/commands.go（覆盖 Task 7 写入的命令桩）**
+
+整个文件替换，不是追加：Task 7 写入的九个命令桩必须被覆盖掉，否则会产生重复定义。
 
 ```go
 package cli
@@ -3478,9 +3512,45 @@ func runUsage(g globalOpts, args []string, stdout, stderr io.Writer) int {
 }
 ```
 
-- [ ] **Step 3: 删除 internal/cli/root.go 中的命令桩**
+- [ ] **Step 3: 追加命令级测试到 internal/cli/root_test.go**
 
-Task 7 Step 5 添加的九个桩函数必须删除，否则会与 `commands.go` 中的实现重复定义，编译失败。
+这两个测试需要真正的命令，所以放在 Task 8 而不是 Task 7：Task 7 里命令只是桩。
+
+先在 `internal/cli/root_test.go` 的 import 块中加入 `"os"`，然后追加：
+
+```go
+func TestGlobalFlagsAreExtractedAnywhere(t *testing.T) {
+	db := newDB(t)
+	stdout, stderr, code := run(t, "--db", db, "add", "--category", "c",
+		"--content", "hello", "--format", "json")
+	if code != exitOK {
+		t.Fatalf("code = %d, stderr = %s", code, stderr)
+	}
+	m := decode(t, stdout)
+	if m["ok"] != true {
+		t.Errorf("envelope = %v", m)
+	}
+	if _, err := os.Stat(db); err != nil {
+		t.Errorf("database was not created at %s: %v", db, err)
+	}
+}
+
+func TestErrorEnvelopeAndExitCode(t *testing.T) {
+	db := newDB(t)
+	_, stderr, code := run(t, "get", "999", "--db", db)
+	if code != exitError {
+		t.Errorf("code = %d, want %d", code, exitError)
+	}
+	m := decode(t, stderr)
+	if m["ok"] != false {
+		t.Errorf("envelope = %v", m)
+	}
+	errObj, _ := m["error"].(map[string]any)
+	if errObj["code"] != codeNotFound {
+		t.Errorf("error code = %v, want %v", errObj["code"], codeNotFound)
+	}
+}
+```
 
 - [ ] **Step 4: 运行测试确认通过**
 

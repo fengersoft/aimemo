@@ -172,7 +172,7 @@ CREATE INDEX idx_memory_tags_tag   ON memory_tags(tag);
 成功（stdout，退出码 `0`）：
 
 ```json
-{"ok":true,"data":{"id":1,"category":"技术选型","type":"important","importance":4,"title":"选型结论","content":"...","scope":"proj-x","source":"","tags":["db","选型"],"created_at":"2026-10-22T09:05:00.123Z","updated_at":"2026-10-22T09:05:00.123Z"}}
+{"ok":true,"data":{"id":1,"category":"技术选型","type":"important","importance":4,"title":"选型结论","content":"...","scope":"proj-x","source":"","tags":["db","选型"],"created_at":"2026-10-22T09:05:00.123456Z","updated_at":"2026-10-22T09:05:00.123456Z"}}
 ```
 
 失败（stderr，退出码 `1`；用法错误为 `2`）：
@@ -334,12 +334,13 @@ transform(s):
 | `1` | `not_found` | `update` / `delete` / `get` 的目标不存在 |
 | `1` | `db_error` | SQLite 写入或查询失败 |
 | `1` | `io_error` | 文件、stdin 读写失败 |
-| `1` | `conflict` | 写入违反唯一约束（如分类名冲突等罕见情况） |
+| `1` | `conflict` | 写入违反唯一约束（无法预先检测的罕见情况） |
 
 其他规则：
 
 - 所有写操作用事务包裹，出错回滚
 - SQLite 错误统一包装为 `db_error`，并保留原始错误文本
+- 重复 tag 在写入前就被检测出来，返回 `invalid_args`（而不是落到 SQLite 的唯一约束错误上）
 - 类别名冲突（`COLLATE NOCASE` 下唯一）→ 复用已有类别，不报错；`update` 改类别到已存在的名称 → 复用
 - `get` 目标不存在同样返回 `not_found`
 - 数据库文件所在目录不存在时自动创建；无法创建则返回 `io_error`
