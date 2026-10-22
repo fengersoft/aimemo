@@ -107,6 +107,19 @@ func TestNowUsesCanonicalFormat(t *testing.T) {
 	}
 }
 
+func TestNowIsStrictlyIncreasing(t *testing.T) {
+	// The wall clock of the host may advance only every few milliseconds, so
+	// two writes in a row must still get different timestamps.
+	prev := Now()
+	for i := 0; i < 100; i++ {
+		got := Now()
+		if got <= prev {
+			t.Fatalf("Now() = %q, want a value greater than %q", got, prev)
+		}
+		prev = got
+	}
+}
+
 func TestWithTxCommitsAndRollsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "aimemo.db")
 	s, err := Open(path)

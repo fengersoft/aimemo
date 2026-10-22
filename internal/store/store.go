@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -58,11 +59,29 @@ func Open(path string) (*Store, error) {
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// nowMu guards lastNow.
+var (
+	nowMu   sync.Mutex
+	lastNow time.Time
+)
+
 // Now returns the canonical timestamp used by every table: UTC RFC3339 with
-// microsecond precision, so lexical order equals chronological order and two
-// writes in the same millisecond still differ.
+// microsecond precision, so lexical order equals chronological order.
+//
+// The wall clock of some hosts advances only every few milliseconds, so two
+// writes in a row would otherwise share a timestamp and an update would look
+// like it changed nothing. The emitted value is therefore strictly
+// increasing: when the clock has not advanced, the previous value is bumped by
+// one microsecond.
 func Now() string {
-	return time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
+	nowMu.Lock()
+	defer nowMu.Unlock()
+	t := time.Now().UTC()
+	if !t.After(lastNow) {
+		t = lastNow.Add(time.Microsecond)
+	}
+	lastNow = t
+	return t.Format("2006-01-02T15:04:05.000000Z")
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx.
