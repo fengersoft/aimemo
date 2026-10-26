@@ -2,10 +2,10 @@
 
 > AI 的可复用经验库 — 让 AI 记住踩过的坑，下次不再重复
 
-[![CI](https://github.com/your-org/aimemo/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/aimemo/actions/workflows/ci.yml)
-[![Go Report](https://goreportcard.com/badge/github.com/your-org/aimemo)](https://goreportcard.com/report/github.com/your-org/aimemo)
+[![CI](https://github.com/fengersoft/aimemo/actions/workflows/ci.yml/badge.svg)](https://github.com/fengersoft/aimemo/actions/workflows/ci.yml)
+[![Go Report](https://goreportcard.com/badge/github.com/fengersoft/aimemo)](https://goreportcard.com/report/github.com/fengersoft/aimemo)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/your-org/aimemo)](https://github.com/your-org/aimemo/releases)
+[![Release](https://img.shields.io/github/v/release/fengersoft/aimemo)](https://github.com/fengersoft/aimemo/releases)
 
 aimemo 是一个为 AI Agent 设计的本地经验库。AI 在解决非平凡问题（修 bug、重构、技术选型）前先检索历史经验，任务结束后将可复用的结论沉淀回来。数据存 SQLite，离线可用，无外部依赖。
 
@@ -26,22 +26,22 @@ aimemo 是一个为 AI Agent 设计的本地经验库。AI 在解决非平凡问
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/your-org/aimemo/releases/latest/download/aimemo_darwin_arm64.tar.gz | tar xz
+curl -L https://github.com/fengersoft/aimemo/releases/latest/download/aimemo_darwin_arm64.tar.gz | tar xz
 sudo mv aimemo /usr/local/bin/
 
 # Linux (amd64)
-curl -L https://github.com/your-org/aimemo/releases/latest/download/aimemo_linux_amd64.tar.gz | tar xz
+curl -L https://github.com/fengersoft/aimemo/releases/latest/download/aimemo_linux_amd64.tar.gz | tar xz
 sudo mv aimemo /usr/local/bin/
 
 # Windows (PowerShell)
-Invoke-WebRequest https://github.com/your-org/aimemo/releases/latest/download/aimemo_windows_amd64.zip -OutFile aimemo.zip
+Invoke-WebRequest https://github.com/fengersoft/aimemo/releases/latest/download/aimemo_windows_amd64.zip -OutFile aimemo.zip
 Expand-Archive aimemo.zip -DestinationPath .
 ```
 
 ### 从源码构建
 
 ```bash
-git clone https://github.com/your-org/aimemo.git
+git clone https://github.com/fengersoft/aimemo.git
 cd aimemo
 CGO_ENABLED=0 go build -o aimemo .
 ```
@@ -241,7 +241,7 @@ aimemo export-md --out ./knowledge --min-importance 4
 
 ```bash
 # 开发环境
-git clone https://github.com/your-org/aimemo.git
+git clone https://github.com/fengersoft/aimemo.git
 cd aimemo
 go test ./...          # 运行测试
 go vet ./...           # 静态检查

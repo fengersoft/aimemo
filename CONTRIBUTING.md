@@ -5,7 +5,7 @@
 ## 开发环境
 
 ```bash
-git clone https://github.com/your-org/aimemo.git
+git clone https://github.com/fengersoft/aimemo.git
 cd aimemo
 
 # 要求 Go 1.24+
@@ -101,7 +101,7 @@ docs: improve README with architecture section
 
 ## 报告 Bug
 
-请使用 [GitHub Issues](https://github.com/your-org/aimemo/issues)，包含：
+请使用 [GitHub Issues](https://github.com/fengersoft/aimemo/issues)，包含：
 
 - 操作系统和 Go 版本
 - 复现步骤
