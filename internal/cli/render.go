@@ -20,10 +20,23 @@ type memoryView struct {
 	ContentPreview string   `json:"content_preview,omitempty"`
 	Scope          string   `json:"scope"`
 	Source         string   `json:"source"`
+	Workspace      string   `json:"workspace,omitempty"`
+	Problem        string   `json:"problem,omitempty"`
+	Solution       string   `json:"solution,omitempty"`
+	Pitfall        string   `json:"pitfall,omitempty"`
+	Example        string   `json:"example,omitempty"`
+	Confidence     int      `json:"confidence"`
+	ValidUntil     string   `json:"valid_until,omitempty"`
+	Supersedes     int64    `json:"supersedes,omitempty"`
+	LastUsedAt     string   `json:"last_used_at,omitempty"`
+	UseCount       int      `json:"use_count"`
+	HelpfulCount   int      `json:"helpful_count"`
+	WrongCount     int      `json:"wrong_count"`
 	Tags           []string `json:"tags"`
 	CreatedAt      string   `json:"created_at"`
 	UpdatedAt      string   `json:"updated_at"`
 	MatchContext   string   `json:"match_context,omitempty"`
+	SemanticScore  float64  `json:"semantic_score,omitempty"`
 }
 
 // previewLimit is the number of characters kept in content_preview.
@@ -40,6 +53,18 @@ func toMemoryView(m store.Memory) memoryView {
 		Content:      m.Content,
 		Scope:        m.Scope,
 		Source:       m.Source,
+		Workspace:    m.Workspace,
+		Problem:      m.Problem,
+		Solution:     m.Solution,
+		Pitfall:      m.Pitfall,
+		Example:      m.Example,
+		Confidence:   m.Confidence,
+		ValidUntil:   m.ValidUntil,
+		Supersedes:   m.Supersedes,
+		LastUsedAt:   m.LastUsedAt,
+		UseCount:     m.UseCount,
+		HelpfulCount: m.HelpfulCount,
+		WrongCount:   m.WrongCount,
 		Tags:         m.Tags,
 		CreatedAt:    m.CreatedAt,
 		UpdatedAt:    m.UpdatedAt,
@@ -77,6 +102,12 @@ func emit(g globalOpts, w io.Writer, data any) {
 // writeText renders the command output as plain text.
 func writeText(w io.Writer, data any) {
 	switch v := data.(type) {
+	case contextOutput:
+		if strings.TrimSpace(v.Context) == "" {
+			fmt.Fprintln(w, "未找到相关历史经验")
+			return
+		}
+		fmt.Fprintln(w, v.Context)
 	case memoryView:
 		writeMemoryText(w, v)
 	case []memoryView:

@@ -102,27 +102,15 @@ func phrase(s string) string {
 // MATCH expression that is expensive for the FTS5 parser to evaluate.
 const MaxQueryRunes = 256
 
-// BuildMatch converts a user query into an FTS5 MATCH expression.
-//
-// The raw user text is never handed to SQLite: every fragment is escaped and
-// wrapped, because an unescaped quote makes FTS5 fail with "unterminated
-// string".
-//
-// The query is cut into fragments by whitespace and then by script. A CJK
-// fragment becomes one phrase, which FTS5 matches only at consecutive
-// positions, i.e. an exact substring: "数据库" matches "本地持久化数据库" but
-// not "数据在别处，还有库". A phrase must also lie inside a single column
-// (title, content or tags). Fragments are combined with AND, so a query that
-// mixes scripts requires all of its fragments to be present. When loose is
-// true each CJK character becomes its own term joined by AND, which widens
-// recall at the cost of the substring guarantee.
-func BuildMatch(query string, loose bool) (string, error) {
-	if n := utf8.RuneCountInString(query); n > MaxQueryRunes {
-		return "", fmt.Errorf("query is %d characters long, at most %d are allowed", n, MaxQueryRunes)
-	}
+// MaxOrQueryRunes caps a disjunctive retrieval query. It is larger than
+// MaxQueryRunes because callers expand a task description into many terms.
+const MaxOrQueryRunes = 2048
+
+// matchTerms turns a query into escaped FTS5 terms.
+func matchTerms(query string, loose bool) ([]string, error) {
 	fields := strings.Fields(query)
 	if len(fields) == 0 {
-		return "", fmt.Errorf("empty query")
+		return nil, fmt.Errorf("empty query")
 	}
 	var terms []string
 	for _, field := range fields {
@@ -144,9 +132,48 @@ func BuildMatch(query string, loose bool) (string, error) {
 		}
 	}
 	if len(terms) == 0 {
-		return "", fmt.Errorf("query contains no searchable terms")
+		return nil, fmt.Errorf("query contains no searchable terms")
+	}
+	return terms, nil
+}
+
+// BuildMatch converts a user query into an FTS5 MATCH expression.
+//
+// The raw user text is never handed to SQLite: every fragment is escaped and
+// wrapped, because an unescaped quote makes FTS5 fail with "unterminated
+// string".
+//
+// The query is cut into fragments by whitespace and then by script. A CJK
+// fragment becomes one phrase, which FTS5 matches only at consecutive
+// positions, i.e. an exact substring: "数据库" matches "本地持久化数据库" but
+// not "数据在别处，还有库". A phrase must also lie inside a single column
+// (title, content or tags). Fragments are combined with AND, so a query that
+// mixes scripts requires all of its fragments to be present. When loose is
+// true each CJK character becomes its own term joined by AND, which widens
+// recall at the cost of the substring guarantee.
+func BuildMatch(query string, loose bool) (string, error) {
+	if n := utf8.RuneCountInString(query); n > MaxQueryRunes {
+		return "", fmt.Errorf("query is %d characters long, at most %d are allowed", n, MaxQueryRunes)
+	}
+	terms, err := matchTerms(query, loose)
+	if err != nil {
+		return "", err
 	}
 	return strings.Join(terms, " AND "), nil
+}
+
+// BuildMatchOr converts a query into an FTS5 MATCH expression where any
+// fragment may match. It is used for ranked retrieval, where recall matters
+// more than requiring every fragment to be present.
+func BuildMatchOr(query string, loose bool) (string, error) {
+	if n := utf8.RuneCountInString(query); n > MaxOrQueryRunes {
+		return "", fmt.Errorf("query is %d characters long, at most %d are allowed", n, MaxOrQueryRunes)
+	}
+	terms, err := matchTerms(query, loose)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(terms, " OR "), nil
 }
 
 // queryFragments returns the raw fragments of a query, used to locate a match

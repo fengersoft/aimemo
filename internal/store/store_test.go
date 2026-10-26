@@ -153,3 +153,67 @@ func TestWithTxCommitsAndRollsBack(t *testing.T) {
 		t.Errorf("rolled back row is still present")
 	}
 }
+
+func TestOpenMigratesV1Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+CREATE TABLE categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL REFERENCES categories(id),
+    type TEXT NOT NULL DEFAULT 'note',
+    importance INTEGER NOT NULL DEFAULT 3,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO categories(name, created_at, updated_at) VALUES('legacy', '2024-01-01T00:00:00.000000Z', '2024-01-01T00:00:00.000000Z');
+INSERT INTO memories(category_id, content, created_at, updated_at)
+VALUES(1, 'legacy body', '2024-01-01T00:00:00.000000Z', '2024-01-01T00:00:00.000000Z');
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	defer s.Close()
+
+	m, err := s.Get(1, "")
+	if err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	if m.Content != "legacy body" || m.Workspace != "" || m.Confidence != 3 {
+		t.Errorf("migrated row = %+v", m)
+	}
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version = %d, want %d", version, schemaVersion)
+	}
+
+	// Opening twice must stay idempotent.
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+}

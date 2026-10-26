@@ -17,6 +17,9 @@ func newDB(t *testing.T) string {
 // run invokes the CLI and returns stdout, stderr and the exit code.
 func run(t *testing.T, args ...string) (string, string, int) {
 	t.Helper()
+	t.Setenv("AIMEMO_CONFIG", filepath.Join(t.TempDir(), "absent.json"))
+	t.Setenv("AIMEMO_DB", "")
+	t.Setenv("AIMEMO_WORKSPACE", "")
 	var out, errb bytes.Buffer
 	code := Run(args, &out, &errb)
 	return out.String(), errb.String(), code

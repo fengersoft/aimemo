@@ -191,3 +191,46 @@ func TestQueryFragments(t *testing.T) {
 		}
 	}
 }
+
+func FuzzBuildMatch(f *testing.F) {
+	for _, s := range []string{"", "数据库", `a"b`, "\x00", strings.Repeat("中", MaxQueryRunes+10)} {
+		f.Add(s, false)
+		f.Add(s, true)
+	}
+	f.Fuzz(func(t *testing.T, query string, loose bool) {
+		got, err := BuildMatch(query, loose)
+		if err != nil {
+			return
+		}
+		if got == "" {
+			t.Fatalf("BuildMatch(%q) returned an empty expression", query)
+		}
+		if strings.ContainsRune(got, 0) {
+			t.Fatalf("BuildMatch(%q) leaked NUL: %q", query, got)
+		}
+		if strings.Count(got, `"`)%2 != 0 {
+			t.Fatalf("BuildMatch(%q) has unbalanced quotes: %q", query, got)
+		}
+	})
+}
+
+func FuzzBuildMatchOr(f *testing.F) {
+	for _, s := range []string{"", "数据库 sqlite", `"x"`, strings.Repeat("字", MaxOrQueryRunes+10)} {
+		f.Add(s, false)
+	}
+	f.Fuzz(func(t *testing.T, query string, loose bool) {
+		got, err := BuildMatchOr(query, loose)
+		if err != nil {
+			return
+		}
+		if got == "" {
+			t.Fatalf("BuildMatchOr(%q) returned an empty expression", query)
+		}
+		if strings.ContainsRune(got, 0) {
+			t.Fatalf("BuildMatchOr(%q) leaked NUL: %q", query, got)
+		}
+		if strings.Count(got, `"`)%2 != 0 {
+			t.Fatalf("BuildMatchOr(%q) has unbalanced quotes: %q", query, got)
+		}
+	})
+}

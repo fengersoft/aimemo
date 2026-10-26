@@ -1,4 +1,34 @@
+# Binaries
 *.exe
-aimemo.db
-aimemo.db-shm
-aimemo.db-wal
+*.exe~
+*.dll
+*.so
+*.dylib
+aimemo
+bin/
+
+# Test binary
+*.test
+
+# Output
+*.out
+*.prof
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/

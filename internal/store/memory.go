@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ErrInvalid marks caller input that failed validation.
@@ -15,13 +16,14 @@ var ErrNotFound = errors.New("not found")
 
 // Field limits.
 const (
-	MaxContentLen  = 100000
-	MaxTitleLen    = 500
-	MaxCategoryLen = 100
-	MaxTagLen      = 50
-	MaxTags        = 20
-	MaxScopeLen    = 200
-	MaxSourceLen   = 200
+	MaxContentLen   = 100000
+	MaxTitleLen     = 500
+	MaxCategoryLen  = 100
+	MaxTagLen       = 50
+	MaxTags         = 20
+	MaxScopeLen     = 200
+	MaxSourceLen    = 200
+	MaxWorkspaceLen = 100
 )
 
 // Valid memory types.
@@ -44,8 +46,20 @@ type Memory struct {
 	Importance   int      `json:"importance"`
 	Title        string   `json:"title"`
 	Content      string   `json:"content"`
+	Problem      string   `json:"problem,omitempty"`
+	Solution     string   `json:"solution,omitempty"`
+	Pitfall      string   `json:"pitfall,omitempty"`
+	Example      string   `json:"example,omitempty"`
 	Scope        string   `json:"scope"`
 	Source       string   `json:"source"`
+	Workspace    string   `json:"workspace,omitempty"`
+	Confidence   int      `json:"confidence"`
+	ValidUntil   string   `json:"valid_until,omitempty"`
+	Supersedes   int64    `json:"supersedes,omitempty"`
+	LastUsedAt   string   `json:"last_used_at,omitempty"`
+	UseCount     int      `json:"use_count"`
+	HelpfulCount int      `json:"helpful_count"`
+	WrongCount   int      `json:"wrong_count"`
 	Tags         []string `json:"tags"`
 	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
@@ -59,9 +73,19 @@ type CreateInput struct {
 	Importance int
 	Title      string
 	Content    string
+	Problem    string
+	Solution   string
+	Pitfall    string
+	Example    string
 	Scope      string
 	Source     string
+	Workspace  string
+	Confidence int
+	ValidUntil string
+	Supersedes int64
 	Tags       []string
+	CreatedAt  string
+	UpdatedAt  string
 }
 
 // withDefaults fills in the values a caller may leave unset.
@@ -72,7 +96,39 @@ func (in CreateInput) withDefaults() CreateInput {
 	if in.Importance == 0 {
 		in.Importance = 3
 	}
+	if in.Confidence == 0 {
+		in.Confidence = 3
+	}
+	if in.CreatedAt == "" {
+		in.CreatedAt = Now()
+	}
+	if in.UpdatedAt == "" {
+		in.UpdatedAt = in.CreatedAt
+	}
 	return in
+}
+
+// canonicalTime is the layout used by every stored timestamp.
+const canonicalTime = "2006-01-02T15:04:05.000000Z"
+
+// validTimestamp reports whether ts is empty or a canonical timestamp.
+func validTimestamp(ts string) bool {
+	if ts == "" {
+		return true
+	}
+	_, err := time.Parse(canonicalTime, ts)
+	return err == nil
+}
+
+// structuredBody joins the optional structured fields for FTS indexing.
+func structuredBody(content, problem, solution, pitfall, example string) string {
+	parts := make([]string, 0, 5)
+	for _, p := range []string{content, problem, solution, pitfall, example} {
+		if strings.TrimSpace(p) != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func (in CreateInput) validate() error {
@@ -103,6 +159,25 @@ func (in CreateInput) validate() error {
 	if len([]rune(in.Source)) > MaxSourceLen {
 		return fmt.Errorf("%w: source exceeds %d characters", ErrInvalid, MaxSourceLen)
 	}
+	if len([]rune(in.Workspace)) > MaxWorkspaceLen {
+		return fmt.Errorf("%w: workspace exceeds %d characters", ErrInvalid, MaxWorkspaceLen)
+	}
+	if in.Confidence < 1 || in.Confidence > 5 {
+		return fmt.Errorf("%w: confidence must be between 1 and 5", ErrInvalid)
+	}
+	if len([]rune(in.Problem)) > MaxContentLen || len([]rune(in.Solution)) > MaxContentLen ||
+		len([]rune(in.Pitfall)) > MaxContentLen || len([]rune(in.Example)) > MaxContentLen {
+		return fmt.Errorf("%w: structured fields exceed %d characters", ErrInvalid, MaxContentLen)
+	}
+	if _, err := ParseDeadline(in.ValidUntil); err != nil {
+		return err
+	}
+	if in.Supersedes < 0 {
+		return fmt.Errorf("%w: supersedes must not be negative", ErrInvalid)
+	}
+	if !validTimestamp(in.CreatedAt) || !validTimestamp(in.UpdatedAt) {
+		return fmt.Errorf("%w: created_at and updated_at must be RFC3339 timestamps", ErrInvalid)
+	}
 	if len(in.Tags) > MaxTags {
 		return fmt.Errorf("%w: at most %d tags are allowed", ErrInvalid, MaxTags)
 	}
@@ -130,10 +205,18 @@ func (s *Store) Create(in CreateInput) (*Memory, error) {
 			return err
 		}
 		now := Now()
+		validUntil, err := ParseDeadline(in.ValidUntil)
+		if err != nil {
+			return err
+		}
 		res, err := tx.Exec(`
-			INSERT INTO memories(category_id, type, importance, title, content, scope, source, created_at, updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?)`,
-			catID, in.Type, in.Importance, in.Title, in.Content, in.Scope, in.Source, now, now)
+			INSERT INTO memories(category_id, type, importance, title, content,
+				problem, solution, pitfall, example, scope, source, workspace,
+				confidence, valid_until, supersedes, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			catID, in.Type, in.Importance, in.Title, in.Content,
+			in.Problem, in.Solution, in.Pitfall, in.Example, in.Scope, in.Source, in.Workspace,
+			in.Confidence, validUntil, in.Supersedes, in.CreatedAt, in.UpdatedAt)
 		if err != nil {
 			return err
 		}
@@ -144,10 +227,19 @@ func (s *Store) Create(in CreateInput) (*Memory, error) {
 		if err := setTags(tx, id, in.Tags, now); err != nil {
 			return err
 		}
-		if err := indexFTS(tx, id, in.Title, in.Content, in.Tags); err != nil {
+		body := structuredBody(in.Content, in.Problem, in.Solution, in.Pitfall, in.Example)
+		if err := indexFTS(tx, id, in.Title, body, in.Tags); err != nil {
 			return err
 		}
-		m, err := getMemory(tx, id)
+		if err := indexFeatures(tx, id, in.Title+"\n"+body); err != nil {
+			return err
+		}
+		if in.Supersedes > 0 {
+			if err := expireMemory(tx, in.Supersedes, id, in.Workspace); err != nil {
+				return err
+			}
+		}
+		m, err := getMemory(tx, id, in.Workspace)
 		if err != nil {
 			return err
 		}
@@ -160,9 +252,9 @@ func (s *Store) Create(in CreateInput) (*Memory, error) {
 	return out, nil
 }
 
-// Get returns one record by id.
-func (s *Store) Get(id int64) (*Memory, error) {
-	m, err := getMemory(s.db, id)
+// Get returns one record by id inside a workspace.
+func (s *Store) Get(id int64, workspace string) (*Memory, error) {
+	m, err := getMemory(s.db, id, workspace)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -170,16 +262,18 @@ func (s *Store) Get(id int64) (*Memory, error) {
 }
 
 // selectMemoryColumns is the standard column list used by every read.
-const selectMemoryColumns = `m.id, m.category_id, c.name, m.type, m.importance, m.title, m.content, m.scope, m.source, m.created_at, m.updated_at`
+const selectMemoryColumns = `m.id, m.category_id, c.name, m.type, m.importance, m.title, m.content, m.problem, m.solution, m.pitfall, m.example, m.scope, m.source, m.workspace, m.confidence, m.valid_until, m.supersedes, m.last_used_at, m.use_count, m.helpful_count, m.wrong_count, m.created_at, m.updated_at`
 
-func getMemory(q querier, id int64) (*Memory, error) {
+func getMemory(q querier, id int64, workspace string) (*Memory, error) {
 	row := q.QueryRow(`
 		SELECT `+selectMemoryColumns+`
 		FROM memories m JOIN categories c ON c.id = m.category_id
-		WHERE m.id = ?`, id)
+		WHERE m.id = ? AND m.workspace = ?`, id, workspace)
 	var m Memory
 	if err := row.Scan(&m.ID, &m.CategoryID, &m.Category, &m.Type, &m.Importance, &m.Title,
-		&m.Content, &m.Scope, &m.Source, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		&m.Content, &m.Problem, &m.Solution, &m.Pitfall, &m.Example, &m.Scope, &m.Source,
+		&m.Workspace, &m.Confidence, &m.ValidUntil, &m.Supersedes, &m.LastUsedAt,
+		&m.UseCount, &m.HelpfulCount, &m.WrongCount, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
 	tags, err := tagsOf(q, m.ID)
@@ -227,19 +321,28 @@ type UpdateInput struct {
 	Importance *int
 	Title      *string
 	Content    *string
+	Problem    *string
+	Solution   *string
+	Pitfall    *string
+	Example    *string
 	Category   *string
 	Scope      *string
 	Source     *string
+	Workspace  *string
+	Confidence *int
+	ValidUntil *string
+	Supersedes *int64
 	SetTags    *[]string
 	AddTags    []string
 	RemoveTags []string
 }
 
-// Update changes a record in place.
-func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
+// Update changes a record in place. workspace selects the record, so a caller
+// cannot modify a memory owned by another workspace.
+func (s *Store) Update(id int64, workspace string, in UpdateInput) (*Memory, error) {
 	var out *Memory
 	err := s.withTx(func(tx *sql.Tx) error {
-		cur, err := getMemory(tx, id)
+		cur, err := getMemory(tx, id, workspace)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -252,26 +355,39 @@ func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
 			Importance: &cur.Importance,
 			Title:      &cur.Title,
 			Content:    &cur.Content,
+			Problem:    &cur.Problem,
+			Solution:   &cur.Solution,
+			Pitfall:    &cur.Pitfall,
+			Example:    &cur.Example,
 			Scope:      &cur.Scope,
 			Source:     &cur.Source,
+			Workspace:  &cur.Workspace,
+			Confidence: &cur.Confidence,
+			ValidUntil: &cur.ValidUntil,
+			Supersedes: &cur.Supersedes,
 		}
-		if in.Type != nil {
-			next.Type = in.Type
+		for _, f := range []struct {
+			dst **string
+			src *string
+		}{
+			{&next.Type, in.Type}, {&next.Title, in.Title}, {&next.Content, in.Content},
+			{&next.Problem, in.Problem}, {&next.Solution, in.Solution},
+			{&next.Pitfall, in.Pitfall}, {&next.Example, in.Example},
+			{&next.Scope, in.Scope}, {&next.Source, in.Source},
+			{&next.Workspace, in.Workspace}, {&next.ValidUntil, in.ValidUntil},
+		} {
+			if f.src != nil {
+				*f.dst = f.src
+			}
 		}
 		if in.Importance != nil {
 			next.Importance = in.Importance
 		}
-		if in.Title != nil {
-			next.Title = in.Title
+		if in.Confidence != nil {
+			next.Confidence = in.Confidence
 		}
-		if in.Content != nil {
-			next.Content = in.Content
-		}
-		if in.Scope != nil {
-			next.Scope = in.Scope
-		}
-		if in.Source != nil {
-			next.Source = in.Source
+		if in.Supersedes != nil {
+			next.Supersedes = in.Supersedes
 		}
 
 		catName := cur.Category
@@ -284,8 +400,16 @@ func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
 			Importance: *next.Importance,
 			Title:      *next.Title,
 			Content:    *next.Content,
+			Problem:    *next.Problem,
+			Solution:   *next.Solution,
+			Pitfall:    *next.Pitfall,
+			Example:    *next.Example,
 			Scope:      *next.Scope,
 			Source:     *next.Source,
+			Workspace:  *next.Workspace,
+			Confidence: *next.Confidence,
+			ValidUntil: *next.ValidUntil,
+			Supersedes: *next.Supersedes,
 		}
 		if err := probe.validate(); err != nil {
 			return err
@@ -300,12 +424,20 @@ func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
 		}
 
 		now := Now()
+		validUntil, err := ParseDeadline(*next.ValidUntil)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`
 			UPDATE memories
-			SET category_id=?, type=?, importance=?, title=?, content=?, scope=?, source=?, updated_at=?
-			WHERE id=?`,
+			SET category_id=?, type=?, importance=?, title=?, content=?,
+				problem=?, solution=?, pitfall=?, example=?, scope=?, source=?,
+				workspace=?, confidence=?, valid_until=?, supersedes=?, updated_at=?
+			WHERE id=? AND workspace=?`,
 			catID, *next.Type, *next.Importance, *next.Title, *next.Content,
-			*next.Scope, *next.Source, now, id); err != nil {
+			*next.Problem, *next.Solution, *next.Pitfall, *next.Example,
+			*next.Scope, *next.Source, *next.Workspace, *next.Confidence,
+			validUntil, *next.Supersedes, now, id, workspace); err != nil {
 			return err
 		}
 
@@ -367,10 +499,19 @@ func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
 			}
 		}
 
-		if err := indexFTS(tx, id, *next.Title, *next.Content, tags); err != nil {
+		body := structuredBody(*next.Content, *next.Problem, *next.Solution, *next.Pitfall, *next.Example)
+		if err := indexFTS(tx, id, *next.Title, body, tags); err != nil {
 			return err
 		}
-		m, err := getMemory(tx, id)
+		if err := indexFeatures(tx, id, *next.Title+"\n"+body); err != nil {
+			return err
+		}
+		if in.Supersedes != nil && *in.Supersedes > 0 {
+			if err := expireMemory(tx, *in.Supersedes, id, *next.Workspace); err != nil {
+				return err
+			}
+		}
+		m, err := getMemory(tx, id, *next.Workspace)
 		if err != nil {
 			return err
 		}
@@ -383,10 +524,10 @@ func (s *Store) Update(id int64, in UpdateInput) (*Memory, error) {
 	return out, nil
 }
 
-// Delete removes a record, its tags and its FTS row.
-func (s *Store) Delete(id int64) error {
+// Delete removes a record in a workspace, its tags and its FTS row.
+func (s *Store) Delete(id int64, workspace string) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, id)
+		res, err := tx.Exec(`DELETE FROM memories WHERE id = ? AND workspace = ?`, id, workspace)
 		if err != nil {
 			return err
 		}
@@ -490,4 +631,37 @@ func (s *Store) Search(query string, f Filter, limit, offset int, sort string, l
 		items[i].MatchContext = MatchContext(items[i].Content, query, 120)
 	}
 	return &SearchResult{Items: items, Total: total, Query: query}, nil
+}
+
+// SearchAny returns memories that match any fragment of query. The caller is
+// expected to rank the results, so the store only applies the filter and a
+// hard cap. This backs the context command, where a task description is
+// expanded into many loosely related terms.
+func (s *Store) SearchAny(query string, f Filter, limit int, loose bool) ([]Memory, error) {
+	expr, err := BuildMatchOr(query, loose)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	where, args := f.clauses()
+	args = append([]any{expr}, args...)
+
+	rows, err := s.db.Query(`
+		SELECT `+selectMemoryColumns+`
+		FROM memories_fts
+		JOIN memories m ON m.id = memories_fts.rowid
+		JOIN categories c ON c.id = m.category_id
+		WHERE memories_fts MATCH ?`+where+`
+		ORDER BY m.importance DESC, m.created_at DESC, m.id DESC
+		LIMIT ?`, append(args, limit)...)
+	if err != nil {
+		return nil, err
+	}
+	items, err := scanMemories(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := attachTags(s.db, items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

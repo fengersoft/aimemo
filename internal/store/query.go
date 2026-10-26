@@ -8,13 +8,17 @@ import (
 // Filter narrows a listing or a search. Repeated values inside one field are
 // combined with OR.
 type Filter struct {
-	Categories    []string
-	Scopes        []string
-	Types         []string
-	Tags          []string
-	MinImportance int
-	Since         string
-	Until         string
+	Categories     []string
+	Scopes         []string
+	Types          []string
+	Tags           []string
+	Workspace      string
+	AllWorkspaces  bool
+	MinImportance  int
+	MinConfidence  int
+	IncludeExpired bool
+	Since          string
+	Until          string
 }
 
 // clauses renders the filter as a SQL predicate plus its bind arguments.
@@ -58,6 +62,20 @@ func (f Filter) clauses() (string, []any) {
 		cs = append(cs, "m.importance >= ?")
 		args = append(args, f.MinImportance)
 	}
+	if f.MinConfidence > 0 {
+		cs = append(cs, "m.confidence >= ?")
+		args = append(args, f.MinConfidence)
+	}
+	// The empty workspace is itself a namespace, so the default listing only
+	// shows default-workspace memories. AllWorkspaces bypasses this filter.
+	if !f.AllWorkspaces {
+		cs = append(cs, "m.workspace = ?")
+		args = append(args, f.Workspace)
+	}
+	if !f.IncludeExpired {
+		cs = append(cs, "(m.valid_until = '' OR m.valid_until >= ?)")
+		args = append(args, Now())
+	}
 	if f.Since != "" {
 		cs = append(cs, "m.created_at >= ?")
 		args = append(args, f.Since)
@@ -78,6 +96,10 @@ func orderBy(sort string, searchable bool) string {
 	switch sort {
 	case "importance":
 		return "ORDER BY m.importance DESC, m.created_at DESC, m.id DESC"
+	case "confidence":
+		return "ORDER BY m.confidence DESC, m.importance DESC, m.created_at DESC, m.id DESC"
+	case "helpful":
+		return "ORDER BY m.helpful_count DESC, m.use_count DESC, m.importance DESC, m.created_at DESC, m.id DESC"
 	case "relevance":
 		if searchable {
 			return "ORDER BY bm25(memories_fts), m.created_at DESC, m.id DESC"
@@ -128,7 +150,10 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	for rows.Next() {
 		var m Memory
 		if err := rows.Scan(&m.ID, &m.CategoryID, &m.Category, &m.Type, &m.Importance,
-			&m.Title, &m.Content, &m.Scope, &m.Source, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			&m.Title, &m.Content, &m.Problem, &m.Solution, &m.Pitfall, &m.Example,
+			&m.Scope, &m.Source, &m.Workspace, &m.Confidence, &m.ValidUntil, &m.Supersedes,
+			&m.LastUsedAt, &m.UseCount, &m.HelpfulCount, &m.WrongCount,
+			&m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

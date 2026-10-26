@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>aimemo 浏览器</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <h1>aimemo</h1>
+    <span id="ws" class="ws"></span>
+    <input id="q" type="search" placeholder="搜索...">
+    <select id="category"></select>
+    <button id="refresh">刷新</button>
+  </header>
+  <main>
+    <aside>
+      <div id="list"></div>
+      <div class="pager">
+        <button id="prev">上一页</button>
+        <span id="pageinfo"></span>
+        <button id="next">下一页</button>
+      </div>
+    </aside>
+    <section id="detail">
+      <div id="empty">选择左侧记录查看详情</div>
+      <article id="article" hidden>
+        <h2 id="title"></h2>
+        <div class="meta" id="meta"></div>
+        <div class="actions">
+          <button id="copyMd">复制 Markdown</button>
+          <button id="copyJson">复制 JSON</button>
+          <button id="copyPrompt">复制为 Prompt</button>
+        </div>
+        <section class="block"><h3>内容</h3><pre id="content"></pre></section>
+        <section class="block"><h3>问题</h3><pre id="problem"></pre></section>
+        <section class="block"><h3>解决方案</h3><pre id="solution"></pre></section>
+        <section class="block"><h3>踩坑与注意事项</h3><pre id="pitfall"></pre></section>
+        <section class="block"><h3>示例</h3><pre id="example"></pre></section>
+        <section class="block"><h3>标签</h3><div id="tags"></div></section>
+        <section class="block"><h3>元数据</h3><pre id="raw"></pre></section>
+      </article>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -40,8 +40,9 @@ func ensureCategory(tx *sql.Tx, name string) (int64, error) {
 	return res.LastInsertId()
 }
 
-// ListCategories returns every category together with its memory count.
-func (s *Store) ListCategories(sort string) ([]Category, error) {
+// ListCategories returns the categories used in a workspace with their memory
+// counts. Categories that only exist in other workspaces are hidden.
+func (s *Store) ListCategories(sort, workspace string) ([]Category, error) {
 	order := `c.name COLLATE NOCASE ASC`
 	switch sort {
 	case "count":
@@ -52,9 +53,10 @@ func (s *Store) ListCategories(sort string) ([]Category, error) {
 	rows, err := s.db.Query(`
 		SELECT c.name, COUNT(m.id), c.created_at, c.updated_at
 		FROM categories c
-		LEFT JOIN memories m ON m.category_id = c.id
+		JOIN memories m ON m.category_id = c.id
+		WHERE m.workspace = ?
 		GROUP BY c.id
-		ORDER BY ` + order)
+		ORDER BY `+order, workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -80,24 +82,24 @@ type Stats struct {
 	AverageImportance float64        `json:"average_importance"`
 }
 
-// Stats returns a summary of the store.
-func (s *Store) Stats() (*Stats, error) {
+// Stats returns a summary of one workspace.
+func (s *Store) Stats(workspace string) (*Stats, error) {
 	out := &Stats{
 		ByCategory: map[string]int{},
 		ByType:     map[string]int{},
 		ByScope:    map[string]int{},
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&out.Total); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE workspace = ?`, workspace).Scan(&out.Total); err != nil {
 		return nil, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM categories`).Scan(&out.CategoryCount); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT category_id) FROM memories WHERE workspace = ?`, workspace).Scan(&out.CategoryCount); err != nil {
 		return nil, err
 	}
-	if err := s.db.QueryRow(`SELECT COALESCE(AVG(importance), 0) FROM memories`).Scan(&out.AverageImportance); err != nil {
+	if err := s.db.QueryRow(`SELECT COALESCE(AVG(importance), 0) FROM memories WHERE workspace = ?`, workspace).Scan(&out.AverageImportance); err != nil {
 		return nil, err
 	}
 
-	rows, err := s.db.Query(`SELECT c.name, COUNT(m.id) FROM categories c LEFT JOIN memories m ON m.category_id = c.id GROUP BY c.id`)
+	rows, err := s.db.Query(`SELECT c.name, COUNT(m.id) FROM categories c JOIN memories m ON m.category_id = c.id WHERE m.workspace = ? GROUP BY c.id`, workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +116,7 @@ func (s *Store) Stats() (*Stats, error) {
 		return nil, err
 	}
 
-	trows, err := s.db.Query(`SELECT type, COUNT(*) FROM memories GROUP BY type`)
+	trows, err := s.db.Query(`SELECT type, COUNT(*) FROM memories WHERE workspace = ? GROUP BY type`, workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +133,7 @@ func (s *Store) Stats() (*Stats, error) {
 		return nil, err
 	}
 
-	srows, err := s.db.Query(`SELECT scope, COUNT(*) FROM memories GROUP BY scope`)
+	srows, err := s.db.Query(`SELECT scope, COUNT(*) FROM memories WHERE workspace = ? GROUP BY scope`, workspace)
 	if err != nil {
 		return nil, err
 	}

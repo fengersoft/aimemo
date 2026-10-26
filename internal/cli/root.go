@@ -50,13 +50,16 @@ type envelope struct {
 
 // globalOpts holds options valid for every command.
 type globalOpts struct {
-	dbPath string
-	format string
+	dbPath    string
+	format    string
+	workspace string
 }
 
 // commandNames lists the supported subcommands.
 var commandNames = []string{
-	"add", "list", "search", "get", "update", "delete", "categories", "stats", "usage",
+	"add", "list", "search", "context", "get", "update", "delete", "use", "feedback",
+	"categories", "stats", "usage", "export-md", "import-md", "init", "doctor", "backup",
+	"conflicts",
 }
 
 // Run executes one invocation and returns the process exit code.
@@ -75,18 +78,54 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runList(g, cmdArgs, stdout, stderr)
 	case "search":
 		return runSearch(g, cmdArgs, stdout, stderr)
+	case "context":
+		return runContext(g, cmdArgs, stdout, stderr)
 	case "get":
 		return runGet(g, cmdArgs, stdout, stderr)
 	case "update":
 		return runUpdate(g, cmdArgs, stdout, stderr)
 	case "delete":
 		return runDelete(g, cmdArgs, stdout, stderr)
+	case "use":
+		return runUse(g, cmdArgs, stdout, stderr)
+	case "feedback":
+		return runFeedback(g, cmdArgs, stdout, stderr)
 	case "categories":
 		return runCategories(g, cmdArgs, stdout, stderr)
 	case "stats":
 		return runStats(g, cmdArgs, stdout, stderr)
 	case "usage":
 		return runUsage(g, cmdArgs, stdout, stderr)
+	case "export-md":
+		return runExportMd(g, cmdArgs, stdout, stderr)
+	case "import-md":
+		return runImportMd(g, cmdArgs, stdout, stderr)
+	case "init":
+		return runInit(g, cmdArgs, stdout, stderr)
+	case "doctor":
+		return runDoctor(g, cmdArgs, stdout, stderr)
+	case "backup":
+		return runBackup(g, cmdArgs, stdout, stderr)
+	case "version":
+		return runVersion(g, cmdArgs, stdout, stderr)
+	case "prune":
+		return runPrune(g, cmdArgs, stdout, stderr)
+	case "export-json":
+		return runExportJSON(g, cmdArgs, stdout, stderr)
+	case "import-json":
+		return runImportJSON(g, cmdArgs, stdout, stderr)
+	case "tag":
+		return runTag(g, cmdArgs, stdout, stderr)
+	case "workspaces":
+		return runWorkspaces(g, cmdArgs, stdout, stderr)
+	case "conflicts":
+		return runConflicts(g, cmdArgs, stdout, stderr)
+	case "completion":
+		return runCompletion(g, cmdArgs, stdout, stderr)
+	case "updateself":
+		return runUpdateSelf(g, cmdArgs, stdout, stderr)
+	case "web":
+		return runWeb(g, cmdArgs, stdout, stderr)
 	case "help", "-h", "--help":
 		printCommandList(stdout)
 		return exitOK
@@ -100,7 +139,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 // extractGlobals pulls --db and --format out of the argument list so they may
 // appear before or after the subcommand.
 func extractGlobals(args []string) (globalOpts, []string) {
-	g := globalOpts{dbPath: defaultDBPath(), format: "json"}
+	cfg := loadConfig()
+	g := globalOpts{dbPath: effectiveDB(cfg), format: "json", workspace: defaultWorkspace(cfg)}
 	rest := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
@@ -114,6 +154,11 @@ func extractGlobals(args []string) (globalOpts, []string) {
 			i++
 		case strings.HasPrefix(a, "--format="):
 			g.format = strings.TrimPrefix(a, "--format=")
+		case a == "--workspace" && i+1 < len(args):
+			g.workspace = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--workspace="):
+			g.workspace = strings.TrimPrefix(a, "--workspace=")
 		default:
 			rest = append(rest, a)
 		}
@@ -121,16 +166,16 @@ func extractGlobals(args []string) (globalOpts, []string) {
 	return g, rest
 }
 
-// defaultDBPath honours AIMEMO_DB, otherwise uses ~/.aimemo/aimemo.db.
+// defaultDBPath honours AIMEMO_DB, otherwise uses the executable directory.
 func defaultDBPath() string {
 	if p := os.Getenv("AIMEMO_DB"); p != "" {
 		return p
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "aimemo.db"
+	exe, err := os.Executable()
+	if err == nil {
+		return filepath.Join(filepath.Dir(exe), "aimemo.db")
 	}
-	return filepath.Join(home, ".aimemo", "aimemo.db")
+	return "aimemo.db"
 }
 
 // openStore opens the database for a command.

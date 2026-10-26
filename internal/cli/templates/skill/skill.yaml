@@ -1,0 +1,4 @@
+name: aimemo
+version: 1.0.0
+description: AI 经验库 CLI。沉淀可复用经验、技能、模式与教训；对话开始前检索历史经验，结束后提炼并征求同意后存入。SQLite + FTS5，支持中文 CJK 感知搜索，支持上下文排序检索、使用反馈、工作区隔离，并可导出为面向人类的 markdown。
+entry: aimemo
