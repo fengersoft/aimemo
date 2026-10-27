@@ -11,14 +11,25 @@ import (
 // appConfig is the optional on-disk configuration. Flags always win over
 // environment variables, which win over this file.
 type appConfig struct {
-	DB        string  `json:"db"`
-	Workspace string  `json:"workspace"`
-	Web       webConf `json:"web"`
+	DB        string     `json:"db"`
+	Workspace string     `json:"workspace"`
+	Web       webConf    `json:"web"`
+	Context   contextCfg `json:"context"`
 }
 
 type webConf struct {
 	Addr string `json:"addr"`
 	Open bool   `json:"open"`
+}
+
+type contextCfg struct {
+	TitleWeight      float64 `json:"title_weight"`
+	ContentWeight    float64 `json:"content_weight"`
+	TagWeight        float64 `json:"tag_weight"`
+	CategoryWeight   float64 `json:"category_weight"`
+	ImportanceWeight float64 `json:"importance_weight"`
+	RecencyWeight    float64 `json:"recency_weight"`
+	FeedbackWeight   float64 `json:"feedback_weight"`
 }
 
 // configPath returns the config file location.

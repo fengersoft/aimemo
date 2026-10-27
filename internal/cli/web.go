@@ -122,6 +122,10 @@ func (ws *webServer) routes() http.Handler {
 	mux.HandleFunc("/api/get", ws.handleGet)
 	mux.HandleFunc("/api/stats", ws.handleStats)
 	mux.HandleFunc("/api/health", ws.handleAPIHealth)
+	mux.HandleFunc("/api/add", ws.handleAdd)
+	mux.HandleFunc("/api/update", ws.handleUpdate)
+	mux.HandleFunc("/api/delete", ws.handleDelete)
+	mux.HandleFunc("/api/conflicts", ws.handleConflicts)
 	mux.HandleFunc("/static/", ws.handleStatic)
 	return mux
 }
@@ -245,6 +249,182 @@ func (ws *webServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	cats, _ := ws.store.ListCategories("", ws.workspace)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": map[string]any{"stats": st, "categories": cats}})
+}
+
+type webAddReq struct {
+	Category   string   `json:"category"`
+	Type       string   `json:"type"`
+	Importance int      `json:"importance"`
+	Title      string   `json:"title"`
+	Content    string   `json:"content"`
+	Problem    string   `json:"problem"`
+	Solution   string   `json:"solution"`
+	Pitfall    string   `json:"pitfall"`
+	Example    string   `json:"example"`
+	Scope      string   `json:"scope"`
+	Source     string   `json:"source"`
+	Confidence int      `json:"confidence"`
+	Tags       []string `json:"tags"`
+}
+
+func (ws *webServer) handleAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	var req webAddReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(req.Category) == "" || strings.TrimSpace(req.Content) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "category and content required"})
+		return
+	}
+	if req.Type == "" {
+		req.Type = store.TypeNote
+	}
+	if req.Importance == 0 {
+		req.Importance = 3
+	}
+	if req.Confidence == 0 {
+		req.Confidence = 3
+	}
+	s, ok := ws.store.(interface {
+		Create(store.CreateInput) (*store.Memory, error)
+	})
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "not supported"})
+		return
+	}
+	m, err := s.Create(store.CreateInput{
+		Category:   req.Category,
+		Type:       req.Type,
+		Importance: req.Importance,
+		Title:      req.Title,
+		Content:    req.Content,
+		Problem:    req.Problem,
+		Solution:   req.Solution,
+		Pitfall:    req.Pitfall,
+		Example:    req.Example,
+		Scope:      req.Scope,
+		Source:     req.Source,
+		Workspace:  ws.workspace,
+		Confidence: req.Confidence,
+		Tags:       req.Tags,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": m})
+}
+
+type webUpdateReq struct {
+	ID         int64     `json:"id"`
+	Category   *string   `json:"category"`
+	Type       *string   `json:"type"`
+	Importance *int      `json:"importance"`
+	Title      *string   `json:"title"`
+	Content    *string   `json:"content"`
+	Problem    *string   `json:"problem"`
+	Solution   *string   `json:"solution"`
+	Pitfall    *string   `json:"pitfall"`
+	Example    *string   `json:"example"`
+	Scope      *string   `json:"scope"`
+	Source     *string   `json:"source"`
+	Confidence *int      `json:"confidence"`
+	SetTags    *[]string `json:"tags"`
+}
+
+func (ws *webServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	var req webUpdateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json"})
+		return
+	}
+	if req.ID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid id"})
+		return
+	}
+	s, ok := ws.store.(interface {
+		Update(int64, string, store.UpdateInput) (*store.Memory, error)
+	})
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "not supported"})
+		return
+	}
+	in := store.UpdateInput{
+		Category:   req.Category,
+		Type:       req.Type,
+		Importance: req.Importance,
+		Title:      req.Title,
+		Content:    req.Content,
+		Problem:    req.Problem,
+		Solution:   req.Solution,
+		Pitfall:    req.Pitfall,
+		Example:    req.Example,
+		Scope:      req.Scope,
+		Source:     req.Source,
+		Confidence: req.Confidence,
+		SetTags:    req.SetTags,
+	}
+	m, err := s.Update(req.ID, ws.workspace, in)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": m})
+}
+
+func (ws *webServer) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json"})
+		return
+	}
+	if req.ID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid id"})
+		return
+	}
+	s, ok := ws.store.(interface {
+		Delete(int64, string) error
+	})
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "not supported"})
+		return
+	}
+	if err := s.Delete(req.ID, ws.workspace); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": map[string]any{"deleted": req.ID}})
+}
+
+func (ws *webServer) handleConflicts(w http.ResponseWriter, r *http.Request) {
+	s, ok := ws.store.(interface {
+		DetectConflicts(string, int) ([]store.Conflict, error)
+	})
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "not supported"})
+		return
+	}
+	conflicts, err := s.DetectConflicts(ws.workspace, 500)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": map[string]any{"count": len(conflicts), "conflicts": conflicts}})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

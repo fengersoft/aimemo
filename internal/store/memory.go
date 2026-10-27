@@ -665,3 +665,96 @@ func (s *Store) SearchAny(query string, f Filter, limit int, loose bool) ([]Memo
 	}
 	return items, nil
 }
+
+// HybridSearchResult pairs a memory with its hybrid score.
+type HybridSearchResult struct {
+	Memory Memory  `json:"memory"`
+	Score  float64 `json:"score"`
+}
+
+// SearchHybrid combines FTS and semantic search using Reciprocal Rank Fusion.
+func (s *Store) SearchHybrid(query string, f Filter, limit int, alpha float64) ([]HybridSearchResult, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if alpha < 0 {
+		alpha = 0
+	}
+	if alpha > 1 {
+		alpha = 1
+	}
+
+	ftsRes, err := s.Search(query, f, limit*3, 0, "relevance", false)
+	if err != nil {
+		return nil, err
+	}
+	semRes, err := s.SearchSemantic(query, f, limit*3, 2000)
+	if err != nil {
+		return nil, err
+	}
+
+	rank := map[int64]float64{}
+	// FTS ranks
+	for i, m := range ftsRes.Items {
+		r := 1.0 / (float64(i) + 60.0)
+		rank[m.ID] += alpha * r
+	}
+	// Semantic ranks
+	for i, sr := range semRes {
+		r := 1.0 / (float64(i) + 60.0)
+		rank[sr.Memory.ID] += (1.0 - alpha) * r
+	}
+
+	// collect all memories
+	all := map[int64]Memory{}
+	for _, m := range ftsRes.Items {
+		all[m.ID] = m
+	}
+	for _, sr := range semRes {
+		all[sr.Memory.ID] = sr.Memory
+	}
+
+	type scored struct {
+		id    int64
+		score float64
+	}
+	list := make([]scored, 0, len(rank))
+	for id, sc := range rank {
+		list = append(list, scored{id: id, score: sc})
+	}
+	// sort
+	for i := 0; i < len(list); i++ {
+		for j := i + 1; j < len(list); j++ {
+			if list[j].score > list[i].score {
+				list[i], list[j] = list[j], list[i]
+			}
+		}
+	}
+	if len(list) > limit {
+		list = list[:limit]
+	}
+
+	out := make([]HybridSearchResult, 0, len(list))
+	for _, sitem := range list {
+		if m, ok := all[sitem.id]; ok {
+			out = append(out, HybridSearchResult{Memory: m, Score: sitem.score})
+		}
+	}
+	// attach tags
+	memList := make([]Memory, 0, len(out))
+	for _, o := range out {
+		memList = append(memList, o.Memory)
+	}
+	if err := attachTags(s.db, memList); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		for j := range memList {
+			if memList[j].ID == out[i].Memory.ID {
+				out[i].Memory.Tags = memList[j].Tags
+				break
+			}
+		}
+	}
+	return out, nil
+}

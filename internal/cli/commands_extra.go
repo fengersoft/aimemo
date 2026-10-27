@@ -90,6 +90,7 @@ func runFeedback(g globalOpts, args []string, stdout, stderr io.Writer) int {
 func runDoctor(g globalOpts, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	rebuild := fs.Bool("rebuild", false, "rebuild the FTS index when it is inconsistent")
+	check := fs.Bool("check", false, "quick check FTS consistency without full content compare")
 	if _, err := parseFlagSet(fs, args, stdout); err != nil {
 		if errors.Is(err, errHelpRequested) {
 			return exitOK
@@ -107,12 +108,17 @@ func runDoctor(g globalOpts, args []string, stdout, stderr io.Writer) int {
 	}
 	defer s.Close()
 
-	health, err := s.Health()
+	var health *store.Health
+	if *check {
+		health, err = s.QuickCheck()
+	} else {
+		health, err = s.Health()
+	}
 	if err != nil {
 		return fail(g, stderr, err)
 	}
 	rebuilt := 0
-	if *rebuild || !health.Consistent {
+	if *rebuild || (!*check && !health.Consistent) {
 		rebuilt, err = s.RebuildFTS()
 		if err != nil {
 			return fail(g, stderr, err)
@@ -919,8 +925,135 @@ func runConflicts(g globalOpts, args []string, stdout, stderr io.Writer) int {
 		return fail(g, stderr, err)
 	}
 	emit(g, stdout, map[string]any{
-		"count":     len(conflicts),
+			"count":     len(conflicts),
 		"conflicts": conflicts,
 	})
+	return exitOK
+}
+
+func runConflictResolve(g globalOpts, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("conflict-resolve", flag.ContinueOnError)
+	keep := fs.String("keep", "left", "keep left or right")
+	supersede := fs.Bool("supersede", false, "supersede the other memory")
+	merge := fs.Bool("merge", false, "merge into kept memory (create new superseding)")
+	if _, err := parseFlagSet(fs, args, stdout); err != nil {
+		if errors.Is(err, errHelpRequested) {
+			return exitOK
+		}
+		return fail(g, stderr, newError(codeInvalidArgs, "%v", err))
+	}
+	if len(args) < 2 {
+		return fail(g, stderr, newError(codeInvalidArgs, "conflict-resolve requires <left-id> <right-id>"))
+	}
+	leftID, err := parseID(args[0])
+	if err != nil {
+		return fail(g, stderr, err)
+	}
+	rightID, err := parseID(args[1])
+	if err != nil {
+		return fail(g, stderr, err)
+	}
+	if *supersede == *merge {
+		return fail(g, stderr, newError(codeInvalidArgs, "provide exactly one of --supersede or --merge"))
+	}
+	if *keep != "left" && *keep != "right" {
+		return fail(g, stderr, newError(codeInvalidArgs, "keep must be left or right"))
+	}
+
+	s, err := openStore(g)
+	if err != nil {
+		return fail(g, stderr, err)
+	}
+	defer s.Close()
+
+	if *supersede {
+		var oldID, newID int64
+		if *keep == "left" {
+			oldID, newID = rightID, leftID
+		} else {
+			oldID, newID = leftID, rightID
+		}
+		if err := s.Supersede(oldID, newID, g.workspace); err != nil {
+			return fail(g, stderr, err)
+		}
+		emit(g, stdout, map[string]any{"resolved": true, "action": "supersede", "kept": newID, "superseded": oldID})
+		return exitOK
+	}
+
+	// merge: create a new memory based on kept one, supersede both
+	var keepID, otherID int64
+	if *keep == "left" {
+		keepID, otherID = leftID, rightID
+	} else {
+		keepID, otherID = rightID, leftID
+	}
+	km, err := s.Get(keepID, g.workspace)
+	if err != nil {
+		return fail(g, stderr, err)
+	}
+	om, err := s.Get(otherID, g.workspace)
+	if err != nil {
+		return fail(g, stderr, err)
+	}
+	mergedContent := km.Content
+	if strings.TrimSpace(om.Content) != "" && om.Content != km.Content {
+		mergedContent = strings.TrimSpace(km.Content) + "\n\n---\n\n" + strings.TrimSpace(om.Content)
+	}
+	mergedProb := km.Problem
+	if strings.TrimSpace(om.Problem) != "" && om.Problem != km.Problem {
+		if mergedProb == "" {
+			mergedProb = om.Problem
+		}
+	}
+	mergedSol := km.Solution
+	if strings.TrimSpace(om.Solution) != "" && om.Solution != km.Solution {
+		if mergedSol == "" {
+			mergedSol = om.Solution
+		}
+	}
+	mergedPit := km.Pitfall
+	if strings.TrimSpace(om.Pitfall) != "" && om.Pitfall != km.Pitfall {
+		if mergedPit == "" {
+			mergedPit = om.Pitfall
+		}
+	}
+	tags := append([]string{}, km.Tags...)
+	for _, t := range om.Tags {
+		exists := false
+		for _, et := range tags {
+			if et == t {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			tags = append(tags, t)
+		}
+	}
+	nm, err := s.Create(store.CreateInput{
+		Category:   km.Category,
+		Type:       km.Type,
+		Importance: km.Importance,
+		Title:      km.Title,
+		Content:    mergedContent,
+		Problem:    mergedProb,
+		Solution:   mergedSol,
+		Pitfall:    mergedPit,
+		Example:    km.Example,
+		Scope:      km.Scope,
+		Source:     km.Source,
+		Workspace:  g.workspace,
+		Confidence: km.Confidence,
+		ValidUntil: km.ValidUntil,
+		Supersedes: keepID,
+		Tags:       tags,
+	})
+	if err != nil {
+		return fail(g, stderr, err)
+	}
+	if err := s.Supersede(otherID, nm.ID, g.workspace); err != nil {
+		return fail(g, stderr, err)
+	}
+	emit(g, stdout, map[string]any{"resolved": true, "action": "merge", "new_id": nm.ID, "superseded": []int64{keepID, otherID}})
 	return exitOK
 }

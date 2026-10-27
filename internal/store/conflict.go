@@ -182,7 +182,7 @@ func (s *Store) DetectConflicts(workspace string, maxScan int) ([]Conflict, erro
 			if hasNegation(a.Content+a.Solution) && hasPositive(b.Content+b.Solution) {
 				topicA := extractNegationTopic(a.Content + " " + a.Solution)
 				topicB := extractNegationTopic(b.Content + " " + b.Solution)
-				if topicA != "" || topicB != "" || titleSimilarity(a.Title, b.Title) > 0.5 {
+				if topicA != "" || topicB != "" || titleSimilarity(a.Title, b.Title) > 0.4 {
 					id++
 					conflicts = append(conflicts, Conflict{
 						ID:            id,
@@ -202,7 +202,7 @@ func (s *Store) DetectConflicts(workspace string, maxScan int) ([]Conflict, erro
 			if hasNegation(b.Content+b.Solution) && hasPositive(a.Content+a.Solution) {
 				topicA := extractNegationTopic(a.Content + " " + a.Solution)
 				topicB := extractNegationTopic(b.Content + " " + b.Solution)
-				if topicA != "" || topicB != "" || titleSimilarity(a.Title, b.Title) > 0.5 {
+				if topicA != "" || topicB != "" || titleSimilarity(a.Title, b.Title) > 0.4 {
 					id++
 					conflicts = append(conflicts, Conflict{
 						ID:            id,
@@ -215,6 +215,24 @@ func (s *Store) DetectConflicts(workspace string, maxScan int) ([]Conflict, erro
 						RightCategory: b.Category,
 						Explanation:   fmt.Sprintf("%q appears to recommend against what %q recommends", b.Title, a.Title),
 						Score:         0.7 + 0.3*titleSimilarity(a.Title, b.Title),
+					})
+				}
+			}
+			// Contradiction: both recommend different things
+			if hasPositive(a.Content+a.Solution) && hasPositive(b.Content+b.Solution) {
+				if titleSimilarity(a.Title, b.Title) > 0.6 && a.Content != b.Content {
+					id++
+					conflicts = append(conflicts, Conflict{
+						ID:            id,
+						Type:          ConflictContradiction,
+						LeftID:        a.ID,
+						LeftTitle:     a.Title,
+						LeftCategory:  a.Category,
+						RightID:       b.ID,
+						RightTitle:    b.Title,
+						RightCategory: b.Category,
+						Explanation:   fmt.Sprintf("%q and %q suggest different approaches for similar topics", a.Title, b.Title),
+						Score:         0.6 + 0.2*titleSimilarity(a.Title, b.Title),
 					})
 				}
 			}

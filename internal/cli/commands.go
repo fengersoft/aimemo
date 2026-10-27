@@ -308,6 +308,9 @@ func runSearch(g globalOpts, args []string, stdout, stderr io.Writer) int {
 	ff := registerFilterFlags(fs)
 	loose := fs.Bool("loose", false, "relax CJK phrase matching to per character AND")
 	semantic := fs.Bool("semantic", false, "use semantic (feature-vector) search instead of FTS")
+	hybrid := fs.Bool("hybrid", false, "combine FTS and semantic search with reciprocal rank fusion")
+	alpha := fs.Float64("alpha", 0.5, "weight for hybrid fusion (0=semantic only, 1=FTS only)")
+	rank := fs.Bool("rank", false, "use context-aware ranking by task relevance")
 
 	positional, err := parseFlagSet(fs, args, stdout)
 	if err != nil {
@@ -319,6 +322,9 @@ func runSearch(g globalOpts, args []string, stdout, stderr io.Writer) int {
 	query := strings.TrimSpace(strings.Join(positional, " "))
 	if query == "" {
 		return fail(g, stderr, newError(codeInvalidArgs, "search requires a query"))
+	}
+	if *alpha < 0 || *alpha > 1 {
+		return fail(g, stderr, newError(codeInvalidArgs, "alpha must be between 0 and 1"))
 	}
 	f, err := ff.toFilter()
 	if err != nil {
@@ -332,6 +338,21 @@ func runSearch(g globalOpts, args []string, stdout, stderr io.Writer) int {
 	}
 	defer s.Close()
 
+	if *hybrid {
+		res, err := s.SearchHybrid(query, f, ff.limit, *alpha)
+		if err != nil {
+			return fail(g, stderr, err)
+		}
+		items := make([]memoryView, 0, len(res))
+		for _, r := range res {
+			v := toMemoryView(r.Memory)
+			v.SemanticScore = r.Score
+			items = append(items, v)
+		}
+		emit(g, stdout, searchOutput{Items: items, Total: len(res), Query: query})
+		return exitOK
+	}
+
 	if *semantic {
 		results, err := s.SearchSemantic(query, f, ff.limit, 1000)
 		if err != nil {
@@ -344,6 +365,44 @@ func runSearch(g globalOpts, args []string, stdout, stderr io.Writer) int {
 			items = append(items, v)
 		}
 		emit(g, stdout, searchOutput{Items: items, Total: len(results), Query: query})
+		return exitOK
+	}
+
+	if *rank {
+		terms := extractContextTerms(query)
+		if len(terms) == 0 {
+			return fail(g, stderr, newError(codeInvalidArgs, "rank found no searchable terms"))
+		}
+		cands, err := s.SearchAny(strings.Join(termsToStrings(terms), " "), f, 1000, false)
+		if err != nil {
+			return fail(g, stderr, err)
+		}
+		type scored struct {
+			m     store.Memory
+			score float64
+		}
+		ranked := make([]scored, 0, len(cands))
+		for _, m := range cands {
+			score, _ := scoreMemory(m, terms)
+			ranked = append(ranked, scored{m: m, score: score})
+		}
+		sort.SliceStable(ranked, func(i, j int) bool {
+			if ranked[i].score != ranked[j].score {
+				return ranked[i].score > ranked[j].score
+			}
+			if ranked[i].m.Importance != ranked[j].m.Importance {
+				return ranked[i].m.Importance > ranked[j].m.Importance
+			}
+			return ranked[i].m.CreatedAt > ranked[j].m.CreatedAt
+		})
+		if len(ranked) > ff.limit {
+			ranked = ranked[:ff.limit]
+		}
+		items := make([]memoryView, 0, len(ranked))
+		for _, r := range ranked {
+			items = append(items, toMemoryView(r.m))
+		}
+		emit(g, stdout, searchOutput{Items: items, Total: len(items), Query: query})
 		return exitOK
 	}
 
@@ -361,6 +420,14 @@ func runSearch(g globalOpts, args []string, stdout, stderr io.Writer) int {
 	}
 	emit(g, stdout, searchOutput{Items: items, Total: res.Total, Query: res.Query})
 	return exitOK
+}
+
+func termsToStrings(terms []contextTerm) []string {
+	out := make([]string, 0, len(terms))
+	for _, t := range terms {
+		out = append(out, t.text)
+	}
+	return out
 }
 
 // contextTerm is one retrieval term with a relative weight.
@@ -473,6 +540,17 @@ func combinedBody(m store.Memory) string {
 	return strings.Join(parts, "\n\n")
 }
 
+func floatEnv(name string, fallback float64) float64 {
+	if v := os.Getenv(name); v != "" {
+		var f float64
+		_, err := fmt.Sscanf(v, "%f", &f)
+		if err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
 // scoreMemory ranks a memory against the extracted task terms.
 func scoreMemory(m store.Memory, terms []contextTerm) (float64, scoreBreakdown) {
 	title := strings.ToLower(m.Title)
@@ -480,24 +558,35 @@ func scoreMemory(m store.Memory, terms []contextTerm) (float64, scoreBreakdown) 
 	tags := strings.ToLower(strings.Join(m.Tags, " "))
 	category := strings.ToLower(m.Category)
 
+	wTitle := floatEnv("AIMEMO_CTX_WEIGHT_TITLE", 3)
+	wTag := floatEnv("AIMEMO_CTX_WEIGHT_TAG", 2)
+	wContent := floatEnv("AIMEMO_CTX_WEIGHT_CONTENT", 1)
+	wCategory := floatEnv("AIMEMO_CTX_WEIGHT_CATEGORY", 1)
+	wImportance := floatEnv("AIMEMO_CTX_WEIGHT_IMPORTANCE", 0.5)
+	wRecency := floatEnv("AIMEMO_CTX_WEIGHT_RECENCY", 1)
+	wHelpful := floatEnv("AIMEMO_CTX_WEIGHT_HELPFUL", 1.5)
+	wWrong := floatEnv("AIMEMO_CTX_WEIGHT_WRONG", 2)
+	wUse := floatEnv("AIMEMO_CTX_WEIGHT_USE", 0.2)
+
 	var b scoreBreakdown
 	for _, t := range terms {
 		if strings.Contains(title, t.text) {
-			b.Title += t.weight * 3
+			b.Title += t.weight * wTitle
 		}
 		if strings.Contains(tags, t.text) {
-			b.Tags += t.weight * 2
+			b.Tags += t.weight * wTag
 		}
 		if strings.Contains(content, t.text) {
-			b.Content += t.weight
+			b.Content += t.weight * wContent
 		}
 		if strings.Contains(category, t.text) {
-			b.Category += t.weight
+			b.Category += t.weight * wCategory
 		}
 	}
-	b.Importance = float64(m.Importance) * 0.5
-	b.Recency = recencyBonus(m.CreatedAt)
-	b.Feedback = float64(m.HelpfulCount)*1.5 - float64(m.WrongCount)*2 + float64(m.UseCount)*0.2
+	b.Importance = float64(m.Importance) * wImportance
+	rec := recencyBonus(m.CreatedAt)
+	b.Recency = rec * wRecency
+	b.Feedback = float64(m.HelpfulCount)*wHelpful - float64(m.WrongCount)*wWrong + float64(m.UseCount)*wUse
 	total := b.Title + b.Content + b.Tags + b.Category + b.Importance + b.Recency + b.Feedback
 	return total, b
 }

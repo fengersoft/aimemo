@@ -120,6 +120,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runWorkspaces(g, cmdArgs, stdout, stderr)
 	case "conflicts":
 		return runConflicts(g, cmdArgs, stdout, stderr)
+	case "conflict-resolve":
+		return runConflictResolve(g, cmdArgs, stdout, stderr)
 	case "completion":
 		return runCompletion(g, cmdArgs, stdout, stderr)
 	case "updateself":

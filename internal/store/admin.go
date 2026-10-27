@@ -84,6 +84,56 @@ func (s *Store) Health() (*Health, error) {
 	return h, nil
 }
 
+// QuickCheck performs a lightweight check of FTS consistency without full content compare.
+func (s *Store) QuickCheck() (*Health, error) {
+	h := &Health{ExpectedVersion: schemaVersion, Problems: []string{}}
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&h.SchemaVersion); err != nil {
+		return nil, err
+	}
+	if h.SchemaVersion > schemaVersion {
+		h.Problems = append(h.Problems,
+			fmt.Sprintf("database schema v%d is newer than this binary (v%d); upgrade aimemo", h.SchemaVersion, schemaVersion))
+	}
+	if err := s.db.QueryRow(`PRAGMA integrity_check`).Scan(&h.Integrity); err != nil {
+		return nil, err
+	}
+	if h.Integrity != "ok" {
+		h.Problems = append(h.Problems, "integrity_check failed: "+h.Integrity)
+	}
+	if _, err := s.db.Exec(`INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')`); err != nil {
+		h.FTSCheck = err.Error()
+		h.Problems = append(h.Problems, "fts integrity-check failed: "+h.FTSCheck)
+	} else {
+		h.FTSCheck = "ok"
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&h.Memories); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories_fts`).Scan(&h.FTSRows); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM memories m
+		WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.rowid = m.id)`).Scan(&h.MissingFTS); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM memories_fts f
+		WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = f.rowid)`).Scan(&h.OrphanFTS); err != nil {
+		return nil, err
+	}
+	if h.MissingFTS > 0 {
+		h.Problems = append(h.Problems, fmt.Sprintf("%d memories are missing from the FTS index", h.MissingFTS))
+	}
+	if h.OrphanFTS > 0 {
+		h.Problems = append(h.Problems, fmt.Sprintf("%d FTS rows have no memory", h.OrphanFTS))
+	}
+	h.Consistent = h.SchemaVersion <= schemaVersion &&
+		h.Integrity == "ok" && h.FTSCheck == "ok" &&
+		h.Memories == h.FTSRows && h.MissingFTS == 0 && h.OrphanFTS == 0
+	return h, nil
+}
+
 // staleFTSCount compares the stored index text with what indexFTS would write.
 // It streams rows so the check does not hold the whole table in memory.
 func (s *Store) staleFTSCount() (int, error) {
